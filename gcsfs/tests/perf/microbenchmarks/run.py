@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 
 import numpy as np
-from prettytable import PrettyTable
+from prettytable import PrettyTable, TableStyle
 
 from gcsfs.tests.perf.microbenchmarks.conftest import MB
 
@@ -304,6 +304,7 @@ def _print_csv_to_shell(report_path):
             "Max Memory (MiB)",
         ]
         table = PrettyTable()
+        table.set_style(TableStyle.MARKDOWN)
         table.field_names = display_headers
 
         for row in rows:

@@ -1,6 +1,6 @@
 numpy
 psutil
-ptable
+prettytable
 pytest
 pytest-asyncio
 pytest-benchmark
