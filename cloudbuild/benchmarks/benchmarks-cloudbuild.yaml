@@ -6,6 +6,8 @@ substitutions:
   _BENCHMARK_CONFIG: ""
   # Format: "hns regional zonal"
   _BUCKET_TYPES: ""
+  # Target benchmark workload (e.g., "IO" or "METADATA")
+  _BENCHMARK_TYPE: "IO"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -70,7 +72,7 @@ steps:
         wait
     waitFor: ["init-variables"]
 
-  # 4. Create a single VM for benchmarks.
+  # 4a. Create a VM for IO benchmarks (c4-standard-192).
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-vm"
     entrypoint: "bash"
@@ -78,6 +80,17 @@ steps:
       - "-c"
       - |
         set -e
+        # Conditional execution based on benchmark type
+        case "${_BENCHMARK_TYPE}" in
+          IO)
+            echo "Benchmark type is IO. Provisioning high-throughput VM..."
+            ;;
+          *)
+            echo "Skipping create-vm. Benchmark type is ${_BENCHMARK_TYPE}."
+            exit 0
+            ;;
+        esac
+
         source /workspace/build_vars.env
 
         echo "Creating VM: $${VM_NAME}"
@@ -91,6 +104,45 @@ steps:
             --boot-disk-size="30GB" \
             --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
             --network-performance-configs="total-egress-bandwidth-tier=TIER_1" \
+            --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
+            --metadata="enable-oslogin=TRUE" \
+            --service-account="${_VM_SERVICE_ACCOUNT}" \
+            --tags="allow-ssh" \
+            --labels="build-id=$$RUN_ID" \
+            --quiet
+    waitFor: ["init-variables"]
+
+  # 4b. Create a VM for METADATA benchmarks (c4-standard-8).
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "create-metadata-vm"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -e
+        # Conditional execution based on benchmark type
+        case "${_BENCHMARK_TYPE}" in
+          METADATA)
+            echo "Benchmark type is METADATA. Provisioning smaller VM..."
+            ;;
+          *)
+            echo "Skipping create-metadata-vm. Benchmark type is ${_BENCHMARK_TYPE}."
+            exit 0
+            ;;
+        esac
+
+        source /workspace/build_vars.env
+
+        echo "Creating VM: $${VM_NAME}"
+        gcloud compute instances create "$$VM_NAME" \
+            --project="${PROJECT_ID}" \
+            --zone="${_ZONE}" \
+            --machine-type="c4-standard-8" \
+            --image-family="ubuntu-2404-lts-amd64" \
+            --image-project="ubuntu-os-cloud" \
+            --boot-disk-type="hyperdisk-balanced" \
+            --boot-disk-size="30GB" \
+            --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
             --service-account="${_VM_SERVICE_ACCOUNT}" \
@@ -281,6 +333,7 @@ steps:
         fi
     waitFor:
       - "create-vm"
+      - "create-metadata-vm"
       - "create-buckets"
       - "generate-ssh-key"
 
