@@ -7,7 +7,9 @@ substitutions:
   # Format: "hns regional zonal"
   _BUCKET_TYPES: ""
   # Target benchmark workload (e.g., "IO" or "METADATA")
-  _BENCHMARK_TYPE: "IO"
+  _BENCHMARK_TYPE: ""
+  _IO_VM_TYPE: "c4-standard-192"
+  _METADATA_VM_TYPE: "c4-standard-8"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -72,9 +74,9 @@ steps:
         wait
     waitFor: ["init-variables"]
 
-  # 4a. Create a VM for IO benchmarks (c4-standard-192).
+  # 4a. Create a VM for IO benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    id: "create-vm"
+    id: "create-io-vm"
     entrypoint: "bash"
     args:
       - "-c"
@@ -83,10 +85,10 @@ steps:
         # Conditional execution based on benchmark type
         case "${_BENCHMARK_TYPE}" in
           IO)
-            echo "Benchmark type is IO. Provisioning high-throughput VM..."
+            echo "Provisioning ${_BENCHMARK_TYPE} VM"
             ;;
           *)
-            echo "Skipping create-vm. Benchmark type is ${_BENCHMARK_TYPE}."
+            echo "Skipping create-io-vm. Benchmark type is ${_BENCHMARK_TYPE}."
             exit 0
             ;;
         esac
@@ -97,7 +99,7 @@ steps:
         gcloud compute instances create "$$VM_NAME" \
             --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --machine-type="c4-standard-192" \
+            --machine-type="${_IO_VM_TYPE}" \
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-type="hyperdisk-balanced" \
@@ -112,7 +114,7 @@ steps:
             --quiet
     waitFor: ["init-variables"]
 
-  # 4b. Create a VM for METADATA benchmarks (c4-standard-8).
+  # 4b. Create a VM for METADATA benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "create-metadata-vm"
     entrypoint: "bash"
@@ -123,7 +125,7 @@ steps:
         # Conditional execution based on benchmark type
         case "${_BENCHMARK_TYPE}" in
           METADATA)
-            echo "Benchmark type is METADATA. Provisioning smaller VM..."
+            echo "Provisioning ${_BENCHMARK_TYPE} VM"
             ;;
           *)
             echo "Skipping create-metadata-vm. Benchmark type is ${_BENCHMARK_TYPE}."
@@ -137,12 +139,11 @@ steps:
         gcloud compute instances create "$$VM_NAME" \
             --project="${PROJECT_ID}" \
             --zone="${_ZONE}" \
-            --machine-type="c4-standard-8" \
+            --machine-type="${_METADATA_VM_TYPE}" \
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
-            --boot-disk-type="hyperdisk-balanced" \
             --boot-disk-size="30GB" \
-            --network-interface="network-tier=PREMIUM,nic-type=GVNIC" \
+            --network-interface="nic-type=GVNIC" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
             --service-account="${_VM_SERVICE_ACCOUNT}" \
@@ -332,7 +333,7 @@ steps:
           echo "All benchmarks completed successfully."
         fi
     waitFor:
-      - "create-vm"
+      - "create-io-vm"
       - "create-metadata-vm"
       - "create-buckets"
       - "generate-ssh-key"
