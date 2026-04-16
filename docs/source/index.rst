@@ -241,6 +241,7 @@ Contents
    rapid_storage_support
    retries
    fuse
+   prefetcher
    changelog
    code-of-conduct
    :maxdepth: 2
