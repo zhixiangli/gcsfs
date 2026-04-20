@@ -143,7 +143,6 @@ steps:
             --image-family="ubuntu-2404-lts-amd64" \
             --image-project="ubuntu-os-cloud" \
             --boot-disk-size="30GB" \
-            --network-interface="nic-type=GVNIC" \
             --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.read_write" \
             --metadata="enable-oslogin=TRUE" \
             --service-account="${_VM_SERVICE_ACCOUNT}" \
