@@ -10,6 +10,7 @@ substitutions:
   _BENCHMARK_TYPE: ""
   _IO_VM_TYPE: "c4-standard-192"
   _METADATA_VM_TYPE: "c4-standard-8"
+  _SKIP_IF_FAILED: '[[ -f /workspace/FAILED ]] && echo "Skipping: previous step failed" && exit 0'
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -51,6 +52,8 @@ steps:
       - "-c"
       - |
         set -e
+        trap 'echo "create-buckets" >> /workspace/FAILED' ERR
+        ${_SKIP_IF_FAILED}
         source /workspace/build_vars.env
 
         # Create Test Buckets, in parallel
@@ -73,6 +76,7 @@ steps:
 
         wait
     waitFor: ["init-variables"]
+    allowFailure: true
 
   # 4a. Create a VM for IO benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -82,6 +86,8 @@ steps:
       - "-c"
       - |
         set -e
+        trap 'echo "create-io-vm" >> /workspace/FAILED' ERR
+        ${_SKIP_IF_FAILED}
         # Conditional execution based on benchmark type
         case "${_BENCHMARK_TYPE}" in
           IO)
@@ -113,6 +119,7 @@ steps:
             --labels="build-id=$$RUN_ID" \
             --quiet
     waitFor: ["init-variables"]
+    allowFailure: true
 
   # 4b. Create a VM for METADATA benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -122,6 +129,8 @@ steps:
       - "-c"
       - |
         set -e
+        trap 'echo "create-metadata-vm" >> /workspace/FAILED' ERR
+        ${_SKIP_IF_FAILED}
         # Conditional execution based on benchmark type
         case "${_BENCHMARK_TYPE}" in
           METADATA)
@@ -150,6 +159,7 @@ steps:
             --labels="build-id=$$RUN_ID" \
             --quiet
     waitFor: ["init-variables"]
+    allowFailure: true
 
   # 5. Run benchmarks.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -159,10 +169,13 @@ steps:
     args:
       - "-c"
       - |
-        if [ -f /workspace/failure ]; then exit 1; fi
         set -e
+        ${_SKIP_IF_FAILED}
         source /workspace/build_vars.env
-        trap 'touch /workspace/failure' ERR
+        record_failure() {
+          echo "run-benchmarks" >> /workspace/FAILED
+        }
+        trap 'record_failure' ERR
 
         # --- Setup SSH ---
         echo "Waiting for SSH on VM: $${VM_NAME}... (attempt 1/3)"
@@ -184,7 +197,7 @@ steps:
 
         if [ "$$SSH_READY" = false ]; then
             echo "Timeout waiting for SSH."
-            touch /workspace/failure
+            record_failure
             exit 1
         fi
 
@@ -206,7 +219,7 @@ steps:
           echo "Source code copied successfully."
         else
           echo "Failed to copy source code."
-          touch /workspace/failure
+          record_failure
           exit 1
         fi
 
@@ -240,7 +253,7 @@ steps:
           echo "Dependencies installed successfully."
         else
           echo "Failed to install dependencies."
-          touch /workspace/failure
+          record_failure
           exit 1
         fi
 
@@ -320,13 +333,13 @@ steps:
           echo "Results uploaded successfully."
         else
           echo "Failed to upload results."
-          touch /workspace/failure
+          record_failure
           exit 1
         fi
 
         if [ "$${failures:-0}" -ne 0 ]; then
           echo "ERROR: $$failures benchmark jobs failed."
-          touch /workspace/failure
+          record_failure
           exit 1
         else
           echo "All benchmarks completed successfully."
@@ -365,7 +378,7 @@ steps:
             --zone="${_ZONE}" \
             --quiet || true
     waitFor:
-      - "cleanup-ssh-key"
+      - "run-benchmarks"
 
   # 10. Delete all GCS buckets.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
@@ -378,13 +391,19 @@ steps:
         source /workspace/build_vars.env
 
         if [[ " ${_BUCKET_TYPES} " =~ " regional " ]]; then
-          gcloud storage rm --recursive gs://$$REGIONAL_BUCKET &
+          (
+            gcloud storage rm --recursive gs://$$REGIONAL_BUCKET || true
+          ) &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " zonal " ]]; then
-          gcloud storage rm --recursive gs://$$ZONAL_BUCKET &
+          (
+            gcloud storage rm --recursive gs://$$ZONAL_BUCKET || true
+          ) &
         fi
         if [[ " ${_BUCKET_TYPES} " =~ " hns " ]]; then
-          gcloud storage rm --recursive gs://$$HNS_BUCKET &
+          (
+            gcloud storage rm --recursive gs://$$HNS_BUCKET || true
+          ) &
         fi
         wait
     waitFor:
@@ -397,14 +416,16 @@ steps:
     args:
       - "-c"
       - |
-        if [ -f /workspace/failure ]; then
-          echo "Build failed. See previous steps for details."
+        if [[ -f /workspace/FAILED ]]; then
+          echo "Build failed. The following steps reported failures:"
+          sort -u /workspace/FAILED | sed 's/^/ - /'
           exit 1
         fi
         echo "Build successful."
     waitFor:
       - "cleanup-vm"
       - "delete-buckets"
+      - "cleanup-ssh-key"
 
 timeout: "14400s" # 2 hours
 
