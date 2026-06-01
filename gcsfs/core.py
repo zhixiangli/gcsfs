@@ -850,7 +850,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             )
 
             if page.get("kind") != "storage#objects":
-                raise ValueError(f"Expected page kind 'storage#objects', got '{page.get('kind')}'")
+                raise ValueError(
+                    f"Expected page kind 'storage#objects', got '{page.get('kind')}'"
+                )
             prefixes.extend(page.get("prefixes", []))
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
@@ -883,7 +885,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             page = await self._call("GET", "b", project=self.project, json_out=True)
 
             if page.get("kind") != "storage#buckets":
-                raise ValueError(f"Expected page kind 'storage#buckets', got '{page.get('kind')}'")
+                raise ValueError(
+                    f"Expected page kind 'storage#buckets', got '{page.get('kind')}'"
+                )
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
@@ -897,7 +901,9 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 )
 
                 if page.get("kind") != "storage#buckets":
-                    raise ValueError(f"Expected page kind 'storage#buckets', got '{page.get('kind')}'")
+                    raise ValueError(
+                        f"Expected page kind 'storage#buckets', got '{page.get('kind')}'"
+                    )
                 items.extend(page.get("items", []))
                 next_page_token = page.get("nextPageToken", None)
 
@@ -2295,7 +2301,9 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     self.generation = j.get("generation")
             else:
                 if not final:
-                    raise ValueError("Response looks like upload is over but final is False")
+                    raise ValueError(
+                        "Response looks like upload is over but final is False"
+                    )
                 if l:
                     j = json.loads(contents)
                     self.checker.update(data)
