@@ -762,10 +762,15 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
 
     ExtendedGcsFileSystem._finalize_mrd_pool_cache(mock_loop, mock_pool)
 
-    # Verify that run_coroutine_threadsafe was called
-    mock_run_coroutine_threadsafe.assert_called_once()
-    args, _ = mock_run_coroutine_threadsafe.call_args
-    assert args[1] == mock_current_loop
+    # Verify that run_coroutine_threadsafe was called with the correct loop
+    # In some environments (e.g. pytest-asyncio), background threads might
+    # invoke run_coroutine_threadsafe concurrently, so we check assert_any_call.
+    found = False
+    for call_args, _ in mock_run_coroutine_threadsafe.call_args_list:
+        if call_args[1] == mock_current_loop:
+            found = True
+            break
+    assert found, "asyncio.run_coroutine_threadsafe was not called with mock_current_loop"
 
 
 def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):

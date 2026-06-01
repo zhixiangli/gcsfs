@@ -748,7 +748,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                     f"Using HNS-aware folder rename for '{path1}' to '{path2}'."
                 )
                 source_folder_name = f"projects/_/buckets/{bucket1}/folders/{key1}"
-                destination_folder_id = (key2 or key1).rstrip("/") + "/"
+                destination_folder_id = (key2 or key1.rstrip("/").split("/")[-1]).rstrip("/") + "/"
 
                 request = storage_control_v2.RenameFolderRequest(
                     name=source_folder_name,

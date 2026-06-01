@@ -186,6 +186,10 @@ def test_read_block_zb(extended_gcsfs, gcs_bucket_mocks, subtests):
                         for call in call_args_list:
                             actual_ranges.extend(call[0][0])
 
+                        # Sort the aggregated ranges by offset to ensure deterministic assertions
+                        # when concurrent requests arrive out of order.
+                        actual_ranges.sort(key=lambda r: r[0])
+
                         if delimiter:
                             assert len(actual_ranges) >= 1
                             assert actual_ranges[0][0] == offset
