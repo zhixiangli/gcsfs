@@ -130,7 +130,7 @@ class TestExtendedGcsFileSystemMv:
         path2_key = path2.split("/", 1)[1]
         return storage_control_v2.RenameFolderRequest(
             name=f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/{path1_key}",
-            destination_folder_id=path2_key,
+            destination_folder_id=path2_key.rstrip("/") + "/",
             request_id=FIXED_REQUEST_ID,
         )
 
@@ -434,7 +434,7 @@ class TestExtendedGcsFileSystemMv:
             # Verify HNS rename was used
             expected_request = storage_control_v2.RenameFolderRequest(
                 name=f"projects/_/buckets/{TEST_HNS_BUCKET}/folders/test/{dir_name}",
-                destination_folder_id=dir_name,
+                destination_folder_id=f"{dir_name}/",
                 request_id=FIXED_REQUEST_ID,
             )
             mocks["control_client"].rename_folder.assert_called_once_with(
