@@ -1211,7 +1211,7 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         # Group the paths by bucket and process each group based on bucket type
         for bucket, grp_iter in itertools.groupby(
             sorted(paths, key=lambda p: self.split_path(p)[0] or ""),
-            key=lambda p: self.split_path(p)[0] or ""
+            key=lambda p: self.split_path(p)[0] or "",
         ):
             grp = list(grp_iter)
             is_hns = await self._is_bucket_hns_enabled(bucket) if bucket else False
@@ -1234,7 +1234,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
                 # Directories must be deleted from the deepest first.
                 files = list({p["name"] for p in expanded_paths if p["type"] == "file"})
                 dirs = sorted(
-                    list({p["name"] for p in expanded_paths if p["type"] == "directory"}),
+                    list(
+                        {p["name"] for p in expanded_paths if p["type"] == "directory"}
+                    ),
                     reverse=True,
                 )
 
