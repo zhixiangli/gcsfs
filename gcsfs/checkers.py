@@ -35,7 +35,11 @@ class MD5Checker(ConsistencyChecker):
         self.md.update(data)
 
     def validate_json_response(self, gcs_object):
-        mdback = gcs_object["md5Hash"]
+        mdback = gcs_object.get("md5Hash")
+        if mdback is None:
+            raise NotImplementedError(
+                "No md5 checksum available (GCS does not provide md5 for composite objects)."
+            )
         if b64encode(self.md.digest()) != mdback.encode():
             raise ChecksumError("MD5 checksum failed")
 

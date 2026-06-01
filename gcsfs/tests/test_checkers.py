@@ -167,3 +167,12 @@ def test_checker_validate_json_response(checker, data, actual_data, raises):
             checker.validate_json_response(response)
     else:
         checker.validate_json_response(response)
+
+def test_md5_checker_composite_object():
+    checker = MD5Checker()
+    checker.update(b"hello world")
+
+    # Missing md5Hash key
+    gcs_object = {"size": 11}
+    with pytest.raises(NotImplementedError):
+        checker.validate_json_response(gcs_object)
