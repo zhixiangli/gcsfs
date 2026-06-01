@@ -534,6 +534,7 @@ def test_producer_loop_break_on_stopped_after_wakeup():
     assert fetcher.call_count == 0
     bp.close()
 
+
 def test_prefetcher_short_read_hang():
     class ShortReadFetcher:
         def __init__(self, data):
