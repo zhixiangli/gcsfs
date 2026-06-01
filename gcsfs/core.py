@@ -1401,7 +1401,10 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     # Ignore FileNotFoundError for implicit directories returned by _expand_path.
                     if implicit_dirs is None:
                         implicit_dirs = {
-                            p[: i + 1] for p in paths1 for i, c in enumerate(p) if c == "/"
+                            p[: i + 1]
+                            for p in paths1
+                            for i, c in enumerate(p)
+                            if c == "/"
                         }
                     if p1.rstrip("/") + "/" in implicit_dirs:
                         continue
