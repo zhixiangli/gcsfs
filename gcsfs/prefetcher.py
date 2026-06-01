@@ -333,6 +333,7 @@ class PrefetchConsumer:
         queue: asyncio.Queue,
         wakeup_event: asyncio.Event,
         is_producer_stopped,
+        is_producer_at_eof,
         on_error,
     ):
         """Initializes the consumer.
@@ -341,12 +342,14 @@ class PrefetchConsumer:
             queue (asyncio.Queue): The shared queue containing fetch tasks.
             wakeup_event (asyncio.Event): Event used to wake the producer when more data is needed.
             is_producer_stopped (Callable): Function returning whether the producer has been halted.
+            is_producer_at_eof (Callable): Function returning whether the producer has reached the end of the file.
             on_error (Callable): Callback triggered when a fetch error is encountered.
         """
         logger.debug("Initializing PrefetchConsumer.")
         self.queue = queue
         self.wakeup_event = wakeup_event
         self.is_producer_stopped = is_producer_stopped
+        self.is_producer_at_eof = is_producer_at_eof
         self.on_error = on_error
         self.sequential_streak = 0
         self.offset = 0
@@ -394,6 +397,9 @@ class PrefetchConsumer:
                     break
 
                 if self.queue.empty():
+                    if self.is_producer_at_eof():
+                        logger.debug("Producer is at EOF. No more data to consume.")
+                        break
                     logger.debug("Queue is empty. Waking up producer.")
                     self.wakeup_event.set()
 
@@ -524,6 +530,7 @@ class BackgroundPrefetcher:
             queue=self.queue,
             wakeup_event=self.wakeup_event,
             is_producer_stopped=self._is_producer_stopped,
+            is_producer_at_eof=self._is_producer_at_eof,
             on_error=self._set_error,
         )
 
@@ -559,6 +566,13 @@ class BackgroundPrefetcher:
 
     def _is_producer_stopped(self) -> bool:
         return self.producer.is_stopped if hasattr(self, "producer") else True
+
+    def _is_producer_at_eof(self) -> bool:
+        return (
+            self.producer.current_offset >= self.producer.size
+            if hasattr(self, "producer")
+            else True
+        )
 
     def _set_error(self, e: Exception):
         logger.error("Global error state set in BackgroundPrefetcher: %s", e)

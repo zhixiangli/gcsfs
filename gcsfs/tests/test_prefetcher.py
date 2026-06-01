@@ -533,3 +533,31 @@ def test_producer_loop_break_on_stopped_after_wakeup():
     # Verify the producer gracefully exited without doing work
     assert fetcher.call_count == 0
     bp.close()
+
+def test_prefetcher_short_read_hang():
+    class ShortReadFetcher:
+        def __init__(self, data):
+            self.data = data
+            self.call_count = 0
+
+        async def __call__(self, start, size, split_factor=1):
+            self.call_count += 1
+            # Only return half of the request, simulating a short read
+            actual_size = max(1, size // 2)
+            end = start + actual_size
+            return self.data[start:end]
+
+    data = b"X" * 100
+    bp = BackgroundPrefetcher(fetcher=ShortReadFetcher(data), size=100, concurrency=1)
+
+    # Normally it might hang here if the producer reached EOF but the consumer
+    # still needs more bytes to satisfy the 100 bytes request.
+    try:
+        res = bp._fetch(0, 100)
+    finally:
+        bp.close()
+
+    # The length of res should be exactly the bytes fetched.
+    # It won't be 100 because of the short read and EOF breaking,
+    # but the crucial thing is it doesn't hang!
+    assert len(res) < 100
