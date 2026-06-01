@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import pickle
 import textwrap
 import threading
 import warnings
@@ -105,8 +104,12 @@ class GoogleCredentials:
     def load_tokens(cls):
         """Get "browser" tokens from disc"""
         try:
-            with open(tfile, "rb") as f:
-                tokens = pickle.load(f)
+            with open(tfile, "r") as f:
+                json_data = json.load(f)
+            tokens = {}
+            for key, creds_dict in json_data.items():
+                project, access = json.loads(key)
+                tokens[(project, access)] = Credentials.from_authorized_user_info(creds_dict)
         except Exception:
             tokens = {}
         GoogleCredentials.tokens = tokens
@@ -114,8 +117,12 @@ class GoogleCredentials:
     @staticmethod
     def _save_tokens():
         try:
-            with open(tfile, "wb") as f:
-                pickle.dump(GoogleCredentials.tokens, f, 2)
+            out = {}
+            for (project, access), creds in GoogleCredentials.tokens.items():
+                key = json.dumps((project, access))
+                out[key] = json.loads(creds.to_json())
+            with open(tfile, "w") as f:
+                json.dump(out, f)
         except Exception as e:
             warnings.warn("Saving token cache failed: " + str(e))
 
