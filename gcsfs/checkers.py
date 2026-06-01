@@ -68,10 +68,12 @@ class SizeChecker(ConsistencyChecker):
         self.size += len(data)
 
     def validate_json_response(self, gcs_object):
-        assert int(gcs_object["size"]) == self.size, "Size mismatch"
+        if int(gcs_object["size"]) != self.size:
+            raise ChecksumError(f"Size mismatch: expected {self.size}, got {gcs_object['size']}")
 
     def validate_http_response(self, r):
-        assert r.content_length == self.size
+        if r.content_length != self.size:
+            raise ChecksumError(f"Size mismatch: expected {self.size}, got {r.content_length}")
 
 
 class Crc32cChecker(ConsistencyChecker):

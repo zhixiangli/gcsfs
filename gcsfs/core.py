@@ -849,7 +849,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                 **kwargs,
             )
 
-            assert page["kind"] == "storage#objects"
+            if page.get("kind") != "storage#objects":
+                raise ValueError(f"Expected page kind 'storage#objects', got '{page.get('kind')}'")
             prefixes.extend(page.get("prefixes", []))
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
@@ -881,7 +882,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             items = []
             page = await self._call("GET", "b", project=self.project, json_out=True)
 
-            assert page["kind"] == "storage#buckets"
+            if page.get("kind") != "storage#buckets":
+                raise ValueError(f"Expected page kind 'storage#buckets', got '{page.get('kind')}'")
             items.extend(page.get("items", []))
             next_page_token = page.get("nextPageToken", None)
 
@@ -894,7 +896,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
                     json_out=True,
                 )
 
-                assert page["kind"] == "storage#buckets"
+                if page.get("kind") != "storage#buckets":
+                    raise ValueError(f"Expected page kind 'storage#buckets', got '{page.get('kind')}'")
                 items.extend(page.get("items", []))
                 next_page_token = page.get("nextPageToken", None)
 
@@ -1043,7 +1046,8 @@ class GCSFileSystem(asyn.AsyncFileSystem):
         return self.info(path)["ctime"]
 
     def _parse_timestamp(self, timestamp):
-        assert timestamp.endswith("Z")
+        if not timestamp.endswith("Z"):
+            raise ValueError(f"Expected timestamp to end with 'Z', got '{timestamp}'")
         timestamp = timestamp[:-1]
         timestamp = timestamp + "0" * (6 - len(timestamp.rsplit(".", 1)[-1]))
         return datetime.fromisoformat(timestamp + "+00:00")
@@ -2290,7 +2294,8 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
                     j = json.loads(contents)
                     self.generation = j.get("generation")
             else:
-                assert final, "Response looks like upload is over"
+                if not final:
+                    raise ValueError("Response looks like upload is over but final is False")
                 if l:
                     j = json.loads(contents)
                     self.checker.update(data)
