@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import itertools
 import logging
 import os
 import uuid
@@ -1199,33 +1200,46 @@ class ExtendedGcsFileSystem(GCSFileSystem):
             maxdepth (int, optional): The maximum depth to traverse for deletion.
             batchsize (int): The number of files to delete in a single batch request.
         """
-        if isinstance(path, list):
-            # For HNS check, we can check for bucket type from the first path.
-            bucket, _, _ = self.split_path(path[0]) if path else (None, None, None)
-        else:
-            bucket, _, _ = self.split_path(path)
+        paths = path if isinstance(path, list) else [path]
 
-        is_hns = await self._is_bucket_hns_enabled(bucket)
-
-        if not is_hns:
-            # Fall back to the parent's async rm implementation for non-HNS buckets.
+        # If no paths to delete, fall back to super()
+        if not paths:
             return await super()._rm(
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
             )
 
-        paths = await self._expand_path_with_details(
-            path, recursive=recursive, maxdepth=maxdepth, detail=True
-        )
+        # Group the paths by bucket and process each group based on bucket type
+        for bucket, grp_iter in itertools.groupby(
+            sorted(paths, key=lambda p: self.split_path(p)[0] or ""),
+            key=lambda p: self.split_path(p)[0] or ""
+        ):
+            grp = list(grp_iter)
+            is_hns = await self._is_bucket_hns_enabled(bucket) if bucket else False
 
-        # Separate files and directories based on their type.
-        # Directories must be deleted from the deepest first.
-        files = list({p["name"] for p in paths if p["type"] == "file"})
-        dirs = sorted(
-            list({p["name"] for p in paths if p["type"] == "directory"}),
-            reverse=True,
-        )
+            # Use the original type (str vs list) if this is the only group
+            # and it matches the original path size/type
+            arg = path if not isinstance(path, list) else grp
 
-        return await self._perform_rm(files, dirs, path, batchsize=batchsize)
+            if not is_hns:
+                # Fall back to the parent's async rm implementation for non-HNS buckets.
+                await super()._rm(
+                    arg, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+                )
+            else:
+                expanded_paths = await self._expand_path_with_details(
+                    arg, recursive=recursive, maxdepth=maxdepth, detail=True
+                )
+
+                # Separate files and directories based on their type.
+                # Directories must be deleted from the deepest first.
+                files = list({p["name"] for p in expanded_paths if p["type"] == "file"})
+                dirs = sorted(
+                    list({p["name"] for p in expanded_paths if p["type"] == "directory"}),
+                    reverse=True,
+                )
+
+                await self._perform_rm(files, dirs, arg, batchsize=batchsize)
+        return
 
     async def _perform_rm(self, files, dirs, path, batchsize):
         """
