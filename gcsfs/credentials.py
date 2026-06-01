@@ -109,7 +109,9 @@ class GoogleCredentials:
             tokens = {}
             for key, creds_dict in json_data.items():
                 project, access = json.loads(key)
-                tokens[(project, access)] = Credentials.from_authorized_user_info(creds_dict)
+                tokens[(project, access)] = Credentials.from_authorized_user_info(
+                    creds_dict
+                )
         except Exception:
             tokens = {}
         GoogleCredentials.tokens = tokens
