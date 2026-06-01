@@ -91,6 +91,9 @@ class ZonalFile(GCSFile):
                 "Only read, write and append operations are currently supported for Zonal buckets."
             )
 
+        if object_size is not None:
+            kwargs["_details"] = {"size": object_size, "name": path}
+
         super().__init__(
             gcsfs,
             path,

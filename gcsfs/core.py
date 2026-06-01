@@ -2189,13 +2189,19 @@ class GCSFile(fsspec.spec.AbstractBufferedFile):
         # be set by subclasses that support append operations. Otherwise, the mode
         # will be overwritten to "wb" mode with a warning.
         _supports_append = kwargs.pop("_supports_append", False)
+        _details = kwargs.pop("_details", None)
+        if _details is not None:
+            self._details = _details
+
         if "a" in self.mode and not _supports_append:
             warnings.warn(
                 "Append mode 'a' is not supported in GCS. Using overwrite mode instead."
             )
             self.mode = self.mode.replace("a", "w")
 
-        if "r" in self.mode:
+        if "r" in self.mode and getattr(self, "_details", None) is not None:
+            det = self._details
+        elif "r" in self.mode and content_type is None:
             det = self.details
         else:
             det = {}
