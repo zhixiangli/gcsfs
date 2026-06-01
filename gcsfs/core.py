@@ -1394,11 +1394,16 @@ class GCSFileSystem(asyn.AsyncFileSystem):
             nofiles=True,
         )
 
+        implicit_dirs = None
         for res, p1 in zip(result, paths1):
             if isinstance(res, Exception):
                 if isinstance(res, FileNotFoundError) and recursive:
                     # Ignore FileNotFoundError for implicit directories returned by _expand_path.
-                    if any(p.startswith(p1.rstrip("/") + "/") for p in paths1):
+                    if implicit_dirs is None:
+                        implicit_dirs = {
+                            p[: i + 1] for p in paths1 for i, c in enumerate(p) if c == "/"
+                        }
+                    if p1.rstrip("/") + "/" in implicit_dirs:
                         continue
                 raise res
 
