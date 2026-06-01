@@ -2962,6 +2962,34 @@ async def test_info_parallel(gcs, object_behavior, dir_behavior, expected):
             assert mock_get_dir.call_count == 1
 
 
+def test_parse_timestamp():
+    from gcsfs.core import GCSFileSystem
+
+    fs = GCSFileSystem()
+
+    # Exactly 6 digits
+    ts1 = fs._parse_timestamp("2023-10-25T12:34:56.123456Z")
+    assert ts1.year == 2023 and ts1.month == 10 and ts1.day == 25
+    assert ts1.hour == 12 and ts1.minute == 34 and ts1.second == 56
+    assert ts1.microsecond == 123456
+
+    # >6 digits (sub-microsecond)
+    ts2 = fs._parse_timestamp("2023-10-25T12:34:56.123456789Z")
+    assert ts2.microsecond == 123456
+
+    # <6 digits
+    ts3 = fs._parse_timestamp("2023-10-25T12:34:56.123Z")
+    assert ts3.microsecond == 123000
+
+    # 0 digits
+    ts4 = fs._parse_timestamp("2023-10-25T12:34:56Z")
+    assert ts4.microsecond == 0
+
+    # Missing trailing 'Z'
+    with pytest.raises(ValueError, match="Unexpected timestamp format"):
+        fs._parse_timestamp("2023-10-25T12:34:56.123456")
+
+
 @pytest.mark.asyncio
 async def test_info_parallel_dir_first(gcs):
     import asyncio
