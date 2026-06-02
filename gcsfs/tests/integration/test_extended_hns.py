@@ -700,8 +700,9 @@ class TestExtendedGcsFileSystemRm:
 
     def test_rm_mixed_list_hns_and_non_hns(self, gcs_hns, gcs):
         """Test deleting a list of paths containing both HNS and non-HNS paths."""
-        from gcsfs.tests.settings import TEST_BUCKET
         import uuid
+
+        from gcsfs.tests.settings import TEST_BUCKET
 
         hns_file = f"{TEST_HNS_BUCKET}/mixed_rm_test_file_{uuid.uuid4().hex}.txt"
         non_hns_file = f"{TEST_BUCKET}/mixed_rm_test_file_{uuid.uuid4().hex}.txt"
