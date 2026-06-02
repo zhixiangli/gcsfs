@@ -698,6 +698,28 @@ class TestExtendedGcsFileSystemRm:
         gcsfs.rm(dir_path, recursive=True)
         assert not gcsfs.exists(dir_path)
 
+    def test_rm_mixed_list_hns_and_non_hns(self, gcs_hns, gcs):
+        """Test deleting a list of paths containing both HNS and non-HNS paths."""
+        from gcsfs.tests.settings import TEST_BUCKET
+
+        hns_file = f"{TEST_HNS_BUCKET}/mixed_rm_test_file.txt"
+        non_hns_file = f"{TEST_BUCKET}/mixed_rm_test_file.txt"
+
+        gcs_hns.touch(hns_file)
+        gcs.touch(non_hns_file)
+
+        assert gcs_hns.exists(hns_file)
+        assert gcs.exists(non_hns_file)
+
+        # Test empty list (should do nothing/not raise exception)
+        gcs_hns.rm([])
+
+        # Test mixed list
+        gcs_hns.rm([hns_file, non_hns_file])
+
+        assert not gcs_hns.exists(hns_file)
+        assert not gcs.exists(non_hns_file)
+
     def test_rm_non_empty_folder_recursive(self, gcs_hns):
         """Test recursively deleting a folder with files and subfolders."""
         gcsfs = gcs_hns
