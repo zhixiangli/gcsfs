@@ -770,7 +770,9 @@ def test_finalize_mrd_pool_cache_current_loop_running(monkeypatch):
         if call_args[1] == mock_current_loop:
             found = True
             break
-    assert found, "asyncio.run_coroutine_threadsafe was not called with mock_current_loop"
+    assert (
+        found
+    ), "asyncio.run_coroutine_threadsafe was not called with mock_current_loop"
 
 
 def test_finalize_mrd_pool_cache_asyn_loop_running(monkeypatch):
