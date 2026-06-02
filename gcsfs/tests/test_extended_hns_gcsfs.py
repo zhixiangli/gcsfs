@@ -1926,20 +1926,27 @@ class TestExtendedGcsFileSystemRm:
             if bucket == "flat-bucket":
                 return False
             return True
-        mocker.patch.object(gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type)
+
+        mocker.patch.object(
+            gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type
+        )
 
         mock_super_rm = mocker.patch("gcsfs.core.GCSFileSystem._rm", return_value=[])
         mock_expand = mocker.patch.object(
             gcs_hns,
             "_expand_path_with_details",
-            return_value=[{"name": hns_dir, "type": "directory"}]
+            return_value=[{"name": hns_dir, "type": "directory"}],
         )
         mock_perform_rm = mocker.patch.object(gcs_hns, "_perform_rm", return_value=[])
 
         await gcs_hns._rm([flat_file, hns_dir], recursive=True)
 
-        mock_super_rm.assert_called_once_with([flat_file], recursive=True, maxdepth=None, batchsize=20)
-        mock_expand.assert_called_once_with([hns_dir], recursive=True, maxdepth=None, detail=True)
+        mock_super_rm.assert_called_once_with(
+            [flat_file], recursive=True, maxdepth=None, batchsize=20
+        )
+        mock_expand.assert_called_once_with(
+            [hns_dir], recursive=True, maxdepth=None, detail=True
+        )
         mock_perform_rm.assert_called_once_with([], [hns_dir], [hns_dir], batchsize=20)
 
     async def test_rm_mixed_buckets_hns_first(self, gcs_hns, gcs_hns_mocks, mocker):
@@ -1951,25 +1958,33 @@ class TestExtendedGcsFileSystemRm:
             if bucket == "flat-bucket":
                 return False
             return True
-        mocker.patch.object(gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type)
+
+        mocker.patch.object(
+            gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type
+        )
 
         mock_super_rm = mocker.patch("gcsfs.core.GCSFileSystem._rm", return_value=[])
         mock_expand = mocker.patch.object(
             gcs_hns,
             "_expand_path_with_details",
-            return_value=[{"name": hns_dir, "type": "directory"}]
+            return_value=[{"name": hns_dir, "type": "directory"}],
         )
         mock_perform_rm = mocker.patch.object(gcs_hns, "_perform_rm", return_value=[])
 
         await gcs_hns._rm([hns_dir, flat_file], recursive=True)
 
-        mock_super_rm.assert_called_once_with([flat_file], recursive=True, maxdepth=None, batchsize=20)
-        mock_expand.assert_called_once_with([hns_dir], recursive=True, maxdepth=None, detail=True)
+        mock_super_rm.assert_called_once_with(
+            [flat_file], recursive=True, maxdepth=None, batchsize=20
+        )
+        mock_expand.assert_called_once_with(
+            [hns_dir], recursive=True, maxdepth=None, detail=True
+        )
         mock_perform_rm.assert_called_once_with([], [hns_dir], [hns_dir], batchsize=20)
 
     async def test_rm_empty_list_raises(self, gcs_hns, mocker):
         mock_lookup = mocker.patch.object(gcs_hns, "_lookup_bucket_type")
         import pytest
+
         with pytest.raises(FileNotFoundError):
             await gcs_hns._rm([])
         mock_lookup.assert_not_called()
@@ -1979,34 +1994,44 @@ class TestExtendedGcsFileSystemRm:
 
         async def mock_lookup_bucket_type(bucket):
             return True
-        mocker.patch.object(gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type)
+
+        mocker.patch.object(
+            gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type
+        )
 
         mock_expand = mocker.patch.object(
             gcs_hns,
             "_expand_path_with_details",
-            return_value=[{"name": hns_paths[0], "type": "directory"}, {"name": hns_paths[1], "type": "directory"}]
+            return_value=[
+                {"name": hns_paths[0], "type": "directory"},
+                {"name": hns_paths[1], "type": "directory"},
+            ],
         )
-        mock_perform_rm = mocker.patch.object(gcs_hns, "_perform_rm", return_value=[])
-
         await gcs_hns._rm(hns_paths, recursive=True)
 
         # should be called once for the whole group
-        mock_expand.assert_called_once_with(hns_paths, recursive=True, maxdepth=None, detail=True)
+        mock_expand.assert_called_once_with(
+            hns_paths, recursive=True, maxdepth=None, detail=True
+        )
 
     async def test_rm_efficient_grouping_flat(self, gcs_hns, mocker):
         flat_paths = ["flat-bucket/file1.txt", "flat-bucket/file2.txt"]
 
         async def mock_lookup_bucket_type(bucket):
             return False
-        mocker.patch.object(gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type)
+
+        mocker.patch.object(
+            gcs_hns, "_lookup_bucket_type", side_effect=mock_lookup_bucket_type
+        )
 
         mock_super_rm = mocker.patch("gcsfs.core.GCSFileSystem._rm", return_value=[])
 
         await gcs_hns._rm(flat_paths, recursive=True)
 
         # should be called once for the whole group
-        mock_super_rm.assert_called_once_with(flat_paths, recursive=True, maxdepth=None, batchsize=20)
-
+        mock_super_rm.assert_called_once_with(
+            flat_paths, recursive=True, maxdepth=None, batchsize=20
+        )
 
     def test_rm_file_hns(self, gcs_hns, gcs_hns_mocks):
         """Test sync rm on a single file in an HNS bucket."""
