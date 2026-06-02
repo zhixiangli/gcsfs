@@ -676,6 +676,28 @@ class TestExtendedGcsFileSystemLsIntegration:
 class TestExtendedGcsFileSystemRm:
     """Integration tests for the rm method in ExtendedGcsFileSystem."""
 
+    @pytest.mark.parametrize("order", ["flat_first", "hns_first"])
+    def test_rm_mixed_buckets(self, gcs_hns, order):
+        if not is_real_gcs() or not os.environ.get("GCSFS_RUN_HNS_TESTS"):
+            pytest.skip("Skipping HNS integration tests.")
+
+        flat_dir = f"{TEST_BUCKET}/mixed_rm_flat"
+        flat_file = f"{flat_dir}/file.txt"
+        hns_dir = f"{TEST_HNS_BUCKET}/mixed_rm_hns/"
+
+        gcs_hns.touch(flat_file)
+        gcs_hns.mkdir(hns_dir)
+
+        assert gcs_hns.exists(flat_file)
+        assert gcs_hns.exists(hns_dir)
+
+        paths = [flat_file, hns_dir] if order == "flat_first" else [hns_dir, flat_file]
+
+        gcs_hns.rm(paths, recursive=True)
+
+        assert not gcs_hns.exists(flat_file)
+        assert not gcs_hns.exists(hns_dir)
+
     def test_rm_single_file(self, gcs_hns):
         """Test deleting a single file."""
         gcsfs = gcs_hns
