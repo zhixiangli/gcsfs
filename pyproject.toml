@@ -44,6 +44,7 @@ dev = [
     "pytest-asyncio",
     "pytest-timeout",
     "pytest-cov",
+    "pytest-mock",
     "pytest-subtests",
     "pytest-xdist",
 ]

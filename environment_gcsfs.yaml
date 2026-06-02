@@ -21,6 +21,7 @@ dependencies:
   - pytest-timeout
   - pytest-asyncio
   - pytest-cov
+  - pytest-mock
   - pytest-subtests
   - pytest-xdist
   - requests
