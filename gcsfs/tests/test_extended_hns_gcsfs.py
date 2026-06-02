@@ -2413,6 +2413,7 @@ class TestExtendedGcsFileSystemBucketType:
     def test_rm_mixed_list_hns_and_non_hns_unit(self):
         import asyncio
         from unittest import mock
+
         from gcsfs.extended_gcsfs import ExtendedGcsFileSystem
 
         async def run_test():
