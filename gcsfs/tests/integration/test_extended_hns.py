@@ -1,6 +1,7 @@
+import os
+
 from gcsfs.tests.conftest import TEST_BUCKET
 from gcsfs.tests.utils import is_real_gcs
-import os
 
 """
 This module contains integration tests for Hierarchical Namespace (HNS) enabled buckets.

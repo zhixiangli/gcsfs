@@ -1202,7 +1202,11 @@ class ExtendedGcsFileSystem(GCSFileSystem):
         if not isinstance(path, list):
             bucket, _, _ = self.split_path(path)
             return await self._rm_bucket_paths(
-                bucket, path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
+                bucket,
+                path,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                batchsize=batchsize,
             )
 
         if not path:
@@ -1237,7 +1241,9 @@ class ExtendedGcsFileSystem(GCSFileSystem):
 
         return results
 
-    async def _rm_bucket_paths(self, bucket, path, recursive=False, maxdepth=None, batchsize=20):
+    async def _rm_bucket_paths(
+        self, bucket, path, recursive=False, maxdepth=None, batchsize=20
+    ):
         if not await self._is_bucket_hns_enabled(bucket):
             return await super()._rm(
                 path, recursive=recursive, maxdepth=maxdepth, batchsize=batchsize
