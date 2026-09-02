@@ -10,6 +10,7 @@ substitutions:
   _FILTER: ""
   _HF_TOKEN: ""
   _MODEL_ID: "gs://huggingface-model-weights/Llama-3.1-8B"
+  _USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING: "true"
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -43,6 +44,7 @@ steps:
       - "_FILTER=${_FILTER}"
       - "_HF_TOKEN=${_HF_TOKEN}"
       - "_MODEL_ID=${_MODEL_ID}"
+      - "_USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING=${_USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING}"
       - "PROJECT_ID=${PROJECT_ID}"
     args:
       - "-c"
@@ -91,6 +93,7 @@ steps:
           printf 'export FILTER=%q\n' "$${_FILTER}"
           printf 'export HF_TOKEN=%q\n' "$${_HF_TOKEN}"
           printf 'export MODEL_ID=%q\n' "$${_MODEL_ID}"
+          printf 'export USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING=%q\n' "$${_USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING}"
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
