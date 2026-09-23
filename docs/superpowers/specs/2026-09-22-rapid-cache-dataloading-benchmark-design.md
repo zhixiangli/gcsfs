@@ -1,7 +1,7 @@
 # Rapid Cache coverage for the dataloading subsystem benchmarks
 
 Date: 2026-09-22
-Status: Design, approved in chat; pending written-spec review
+Status: Implemented
 
 ## Context
 
@@ -35,8 +35,8 @@ when a training job *starts*:
   multi-epoch training is the real customer workload. Cold therefore reports a
   genuine first-epoch miss followed by two warmed epochs; warm reports three hit
   epochs.
-- Keep everything inside shared `dataloading/` infrastructure so `ray_data` and
-  `huggingface_datasets` inherit it without rework.
+- Keep everything inside shared `dataloading/` infrastructure so `ray_data`,
+  `huggingface_datasets`, and `checkpointing/` inherit it without rework.
 - Require no new BigQuery columns.
 
 ## Non-goals
@@ -64,8 +64,8 @@ already enforces one type per run), so full coverage is two invocations of
 Both new types require `--zone`, like `zonal` does: a Rapid Cache is zonal and
 must be created in the benchmark VM's zone or it will not serve the reads.
 
-Benchmark ID tokens, added to `_BUCKET` in `dataloading/configurator.py`:
-`rccold` and `rcwarm`.
+Benchmark ID tokens, added to `_BUCKET` in `dataloading/configurator.py` and
+`checkpointing/configurator.py`: `rccold` and `rcwarm`.
 
 ### Per-case cache lifecycle
 
@@ -82,7 +82,7 @@ New module `dataloading/rapid_cache.py` wraps the JSON API through the existing
 | `create(fs, bucket, zone, ingest_on_write)` | `POST b/{bucket}/anywhereCaches` |
 | `wait_running(fs, bucket, zone, timeout, poll)` | `GET b/{bucket}/anywhereCaches/{zone}` until `state == "RUNNING"` |
 | `disable(fs, bucket, zone)` | `POST b/{bucket}/anywhereCaches/{zone}/disable` |
-| `warm_if_needed(prefix, bucket_type, fs=None)` | reads every object under `prefix` |
+| `warm_if_needed(prefix, bucket_type, fs=None)` | streams every object under `prefix` in 16 MiB chunks across up to 16 worker threads using `skip_instance_cache=True` and invalidates client metadata caches in `finally` |
 
 `dataloading/bucket.py` owns create / wait / disable; it already owns bucket
 creation and teardown and it already holds the `BucketSpec` that carries the
@@ -92,7 +92,7 @@ zone. Per case:
 case_bucket:  mkdir regional bucket
               create cache (ingestOnWrite per arm)
               wait until RUNNING
-   read_case: params.ingest(prefix)                  # corpus upload
+   read_case: params.ingest(prefix)                  # corpus upload (or driver.setup in checkpoint_case)
               rapid_cache.warm_if_needed(...)        # untimed, warm arm only
               -- timing window opens --
               driver.run_read(...)  x3 epochs
@@ -102,12 +102,11 @@ case_bucket:  disable cache
               best-effort rmdir
 ```
 
-`warm_if_needed` lives at the `read_case` call site rather than inside
-`case_bucket` because it must run *after* ingestion, and `case_bucket` yields
-before the corpus exists. It is a no-op unless `bucket_type` is
-`rapid_cache_warm` and the prefix is a `gs://` URL, so local-directory runs and
-the other bucket types are unaffected and no new parameter threads through
-`run_read_case`.
+`warm_if_needed` lives at the `read_case` and `checkpoint_case` call sites
+rather than inside `case_bucket` because it must run *after* ingestion/setup,
+and `case_bucket` yields before the corpus exists. It is a no-op unless
+`bucket_type` is `rapid_cache_warm` and the prefix is a `gs://` URL, so
+local-directory runs and the other bucket types are unaffected.
 
 The warm pass is belt-and-braces on top of `ingestOnWrite`: ingestion is
 asynchronous, so reading every object from the VM in the cache's zone is what
@@ -126,14 +125,16 @@ updating to name the new values.
 ### Read amplification
 
 `amplification.py` queries `storage.googleapis.com/network/sent_bytes_count`
-against `resource.type = "gcs_bucket"`. Cache-served bytes are expected not to
-appear there, which would make amplification collapse toward zero on hits and
-serve as a free hit-rate signal.
-
-This expectation is unverified. The first run must check it explicitly. If cache
-reads do show up under the bucket resource, the column is meaningless for these
-arms and must be nulled, with hit rate sourced from Rapid Cache's own metrics
-instead.
+and `storage.googleapis.com/api/request_count` against
+`resource.type = "gcs_bucket"`. When Rapid Cache serves 100% of reads from the
+zonal SSD cache during the timed measurement window, zero bytes and zero origin
+read requests hit the `gcs_bucket` resource, so Cloud Monitoring returns either
+empty time series (`None`) or `0.0` delta points. `amplification.py:enrich_csv`
+coalesces `egress in (None, 0.0) and reqs in (None, 0.0)` to `0.0` for
+`rapid_cache_cold` and `rapid_cache_warm` so `run.py --require-amplification`
+records `0` origin egress (`0.0` read amplification ratio) instead of treating
+100% cache hits as missing metrics, while still retrying if one metric is `> 0`
+and the other is `None` due to Cloud Monitoring ingestion lag.
 
 ## Constraints and the risks they create
 
