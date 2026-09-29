@@ -11,11 +11,16 @@ in test_dircache.py, and zonal-specific filesystem routing belongs in
 test_zonal.py or test_zonal_file.py.
 """
 
+import asyncio
 import contextlib
+import datetime
 import os
+import threading
 import uuid
 from unittest import mock
 
+import google.auth.credentials
+import google.oauth2.credentials
 import pytest
 from google.api_core import exceptions as api_exceptions
 from google.cloud import storage_control_v2
@@ -3090,6 +3095,29 @@ class TestStorageControlRetryExecution:
             assert kwargs["timeout"] == 30.0  # STORAGE_CONTROL_RPC_TIMEOUT
 
 
+class _GatedBucketTypeLookup:
+    """Fake ``_get_bucket_type`` that blocks until released and counts calls."""
+
+    def __init__(self, bucket_type):
+        self.bucket_type = bucket_type
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, bucket):
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return self.bucket_type
+
+
+class _CustomCredentials(google.auth.credentials.Credentials):
+    """A ``Credentials`` subclass defined outside the ``google.*`` namespace."""
+
+    def refresh(self, request):
+        self.token = "refreshed-token"
+
+
 class TestExtendedGcsFileSystemBucketType:
     """Unit tests for ExtendedGcsFileSystem _get_bucket_type and grpc_client."""
 
@@ -3178,3 +3206,190 @@ class TestExtendedGcsFileSystemBucketType:
                 bucket_type = await fs._get_bucket_type("error-bucket")
                 assert bucket_type == BucketType.UNKNOWN
                 assert "Could not determine bucket type" in caplog.text
+
+    # ------------------------------------------------------------------
+    # _lookup_bucket_type: concurrent callers share one in-flight lookup
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bucket_type, is_cached",
+        [(BucketType.ZONAL_HIERARCHICAL, True), (BucketType.UNKNOWN, False)],
+    )
+    async def test_lookup_bucket_type_concurrent_callers_share_one_rpc(
+        self, extended_gcsfs, bucket_type, is_cached
+    ):
+        fs = extended_gcsfs
+        fake = _GatedBucketTypeLookup(bucket_type)
+
+        with mock.patch.object(fs, "_get_bucket_type", new=fake):
+            callers = [
+                asyncio.create_task(fs._lookup_bucket_type("b")) for _ in range(10)
+            ]
+            await fake.started.wait()
+            fake.release.set()
+            results = await asyncio.gather(*callers)
+
+        assert results == [bucket_type] * 10
+        assert fake.calls == 1
+        assert ("b" in fs._storage_layout_cache) is is_cached
+        assert not fs._storage_layout_tasks
+
+    @pytest.mark.asyncio
+    async def test_lookup_bucket_type_retries_after_unknown(self, extended_gcsfs):
+        fs = extended_gcsfs
+
+        with mock.patch.object(
+            fs,
+            "_get_bucket_type",
+            new_callable=mock.AsyncMock,
+            side_effect=[BucketType.UNKNOWN, BucketType.HIERARCHICAL],
+        ) as get_bucket_type:
+            assert await fs._lookup_bucket_type("b") == BucketType.UNKNOWN
+            assert await fs._lookup_bucket_type("b") == BucketType.HIERARCHICAL
+            assert await fs._lookup_bucket_type("b") == BucketType.HIERARCHICAL
+
+        assert get_bucket_type.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_lookup_bucket_type_survives_caller_cancellation(
+        self, extended_gcsfs
+    ):
+        # GCSFileSystem._info cancels the losing _get_directory_info task,
+        # which may be mid-lookup; the lookup must still finish and be cached.
+        fs = extended_gcsfs
+        fake = _GatedBucketTypeLookup(BucketType.HIERARCHICAL)
+
+        with mock.patch.object(fs, "_get_bucket_type", new=fake):
+            caller = asyncio.create_task(fs._lookup_bucket_type("b"))
+            await fake.started.wait()
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+
+            fake.release.set()
+            assert await fs._lookup_bucket_type("b") == BucketType.HIERARCHICAL
+
+        assert fake.calls == 1
+        assert fs._storage_layout_cache["b"] == BucketType.HIERARCHICAL
+
+    def test_lookup_bucket_type_reusable_across_event_loops(self, extended_gcsfs):
+        fs = extended_gcsfs
+
+        async def yielding_unknown(bucket):
+            await asyncio.sleep(0)
+            return BucketType.UNKNOWN
+
+        async def concurrent_lookups():
+            return await asyncio.gather(
+                fs._lookup_bucket_type("b"), fs._lookup_bucket_type("b")
+            )
+
+        with mock.patch.object(fs, "_get_bucket_type", new=yielding_unknown):
+            for _ in range(2):
+                assert asyncio.run(concurrent_lookups()) == [BucketType.UNKNOWN] * 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "on_other_loop", [True, False], ids=["pending_on_other_loop", "cancelled"]
+    )
+    async def test_lookup_bucket_type_replaces_unusable_in_flight_lookup(
+        self, extended_gcsfs, on_other_loop
+    ):
+        fs = extended_gcsfs
+        other_loop = asyncio.new_event_loop()
+        try:
+            if on_other_loop:
+                stale = other_loop.create_future()
+            else:
+                stale = asyncio.get_running_loop().create_future()
+                stale.cancel()
+            fs._storage_layout_tasks["b"] = stale
+            with mock.patch.object(
+                fs,
+                "_get_bucket_type",
+                new_callable=mock.AsyncMock,
+                return_value=BucketType.HIERARCHICAL,
+            ):
+                assert await fs._lookup_bucket_type("b") == BucketType.HIERARCHICAL
+        finally:
+            other_loop.close()
+
+        assert not fs._storage_layout_tasks
+
+    # ------------------------------------------------------------------
+    # _get_bucket_type: credentials are pre-refreshed before the RPC
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_credentials",
+        [
+            lambda: google.oauth2.credentials.Credentials(token=None),
+            _CustomCredentials,
+        ],
+        ids=["google_credentials", "custom_credentials_subclass"],
+    )
+    async def test_get_bucket_type_refreshes_stale_credentials_before_rpc(
+        self, extended_gcsfs, make_credentials
+    ):
+        fs = extended_gcsfs
+        loop_thread = threading.get_ident()
+        events = []
+
+        def fake_refresh():
+            events.append("refresh")
+            assert threading.get_ident() != loop_thread
+
+        async def fake_get_control_plane_client():
+            events.append("client")
+            client = mock.Mock()
+            client.get_storage_layout = mock.AsyncMock(
+                return_value=mock.Mock(location_type="zone")
+            )
+            return client
+
+        with (
+            mock.patch.object(fs.credentials, "credentials", make_credentials()),
+            mock.patch.object(
+                fs.credentials, "maybe_refresh", side_effect=fake_refresh
+            ),
+            mock.patch.object(
+                fs, "_get_control_plane_client", new=fake_get_control_plane_client
+            ),
+        ):
+            assert await fs._get_bucket_type("b") == BucketType.ZONAL_HIERARCHICAL
+
+        assert events == ["refresh", "client"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "make_credentials",
+        [
+            lambda: None,
+            lambda: google.oauth2.credentials.Credentials(
+                token="fresh-token",
+                expiry=datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                + datetime.timedelta(hours=1),
+            ),
+        ],
+        ids=["anonymous", "fresh_credentials"],
+    )
+    async def test_get_bucket_type_skips_refresh_when_not_needed(
+        self, extended_gcsfs, make_credentials
+    ):
+        fs = extended_gcsfs
+
+        with (
+            mock.patch.object(fs.credentials, "credentials", make_credentials()),
+            mock.patch.object(fs.credentials, "maybe_refresh") as maybe_refresh,
+            mock.patch.object(
+                fs, "_get_control_plane_client", new_callable=mock.AsyncMock
+            ) as get_client,
+        ):
+            get_client.return_value.get_storage_layout = mock.AsyncMock(
+                return_value=mock.Mock(location_type="zone")
+            )
+            assert await fs._get_bucket_type("b") == BucketType.ZONAL_HIERARCHICAL
+
+        maybe_refresh.assert_not_called()

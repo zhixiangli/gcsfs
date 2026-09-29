@@ -15,7 +15,7 @@ from fsspec.callbacks import NoOpCallback
 from google.api_core import exceptions as api_exceptions
 from google.api_core.client_info import ClientInfo
 from google.api_core.client_options import ClientOptions
-from google.auth.credentials import AnonymousCredentials
+from google.auth.credentials import AnonymousCredentials, Credentials
 from google.cloud import storage_control_v2
 from google.cloud.storage.asyncio.async_appendable_object_writer import (
     AsyncAppendableObjectWriter,
@@ -35,6 +35,7 @@ from gcsfs.core import (
     _get_prefetcher_and_cache_config,
     _location,
 )
+from gcsfs.credentials import LOCAL_REFRESH_BUFFER
 from gcsfs.retry import DEFAULT_RETRY_CONFIG, get_storage_control_retry_config
 from gcsfs.zb_hns_utils import DirectMemmoveBuffer, MRDPool
 from gcsfs.zonal_file import ZonalFile
@@ -141,6 +142,8 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
         if self.credentials.token == "anon":
             self.credential = AnonymousCredentials()
         self._storage_layout_cache = {}
+        # In-flight storage layout lookups by bucket; see _lookup_bucket_type.
+        self._storage_layout_tasks = {}
         self._memmove_executor = ThreadPoolExecutor(
             max_workers=kwargs.get("memmove_max_workers", 8)
         )
@@ -286,19 +289,50 @@ class ExtendedGcsFileSystem(HnsDirCacheUpdater, GCSFileSystem):
     async def _lookup_bucket_type(self, bucket):
         if bucket in self._storage_layout_cache:
             return self._storage_layout_cache[bucket]
-        bucket_type = await self._get_bucket_type(bucket)
-        # Don't cache UNKNOWN type.
-        # This ensures that subsequent operations will retry the lookup,
-        # allowing it to recover when the transient error resolves.
-        if bucket_type == BucketType.UNKNOWN:
-            return bucket_type
-        self._storage_layout_cache[bucket] = bucket_type
-        return self._storage_layout_cache[bucket]
+        # Concurrent callers share one in-flight lookup per bucket, including
+        # ones that end up UNKNOWN (which is not cached). shield() keeps a
+        # cancelled caller, such as the losing task in _info, from cancelling
+        # the lookup for the others, so its result still reaches the cache.
+        # A lookup running on another event loop can't be awaited here.
+        loop = asyncio.get_running_loop()
+        task = self._storage_layout_tasks.get(bucket)
+        if task is None or task.done() or task.get_loop() is not loop:
+            task = loop.create_task(self._fetch_bucket_type(bucket))
+            self._storage_layout_tasks[bucket] = task
+        return await asyncio.shield(task)
 
     _sync_lookup_bucket_type = asyn.sync_wrapper(_lookup_bucket_type)
 
+    async def _fetch_bucket_type(self, bucket):
+        try:
+            bucket_type = await self._get_bucket_type(bucket)
+            # Don't cache UNKNOWN type.
+            # This ensures that subsequent operations will retry the lookup,
+            # allowing it to recover when the transient error resolves.
+            if bucket_type != BucketType.UNKNOWN:
+                self._storage_layout_cache[bucket] = bucket_type
+            return bucket_type
+        finally:
+            if self._storage_layout_tasks.get(bucket) is asyncio.current_task():
+                del self._storage_layout_tasks[bucket]
+
+    async def _refresh_stale_credentials(self):
+        """Refresh credentials that are missing or near expiry.
+
+        gRPC auth plugins refresh the shared google-auth credentials on gRPC
+        threads without holding ``GoogleCredentials.lock``, so concurrent RPCs
+        can each fetch a token. Refreshing here, off the event loop and under
+        that lock, gives the storage layout RPC and the gRPC calls that follow
+        it a fresh token. It does not replace gRPC's own refresh on expiry.
+        """
+        if isinstance(
+            self.credentials.credentials, Credentials
+        ) and not self.credentials._credentials_valid(LOCAL_REFRESH_BUFFER):
+            await asyncio.to_thread(self.credentials.maybe_refresh)
+
     async def _get_bucket_type(self, bucket):
         try:
+            await self._refresh_stale_credentials()
             client = await self._get_control_plane_client()
             bucket_name_value = f"projects/_/buckets/{bucket}/storageLayout"
             logger.debug(f"get_storage_layout request for name: {bucket_name_value}")
