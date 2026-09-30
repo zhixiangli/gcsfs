@@ -30,8 +30,23 @@ def test_case_ids_are_unique_and_encode_the_corpus_shape():
 def test_image_count_held_constant_except_divisibility_axis():
     for case in _cases():
         images = case.file_count * case.rows_per_file
-        expected = 50_160 if case.sweep_axis == "shard_divisibility" else 50_176
+        expected = {"shard_divisibility": 50_160, "dataset_scale": 501_760}.get(
+            case.sweep_axis, 50_176
+        )
         assert images == expected, f"{case.name} has {images} images"
+
+
+def test_dataset_scale_is_10x_the_baseline_at_the_same_shard_size():
+    """Scale cases keep ~95 MB shards and add shards, so epochs last tens of seconds."""
+    baseline = _baseline()
+    scaled = [c for c in _cases() if c.sweep_axis == "dataset_scale"]
+    assert {(c.read_buffer_bytes, c.gcs_read_mode) for c in scaled} == {
+        (8 * 2**20, "default"),
+        (0, "whole_object"),
+    }
+    for case in scaled:
+        assert case.rows_per_file == baseline.rows_per_file
+        assert case.file_count == 10 * baseline.file_count
 
 
 def test_no_case_starves_a_split():
@@ -101,15 +116,17 @@ def test_axis_names_are_complete():
         "gcs_read_concurrency",
         "read_buffer",
         "decode",
+        "dataset_scale",
     }
 
 
 def test_default_run_is_the_storage_sweep():
     """Only storage-bound variants run by default; the rest are parked."""
     cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
-    assert len(cases) == 10
+    assert len(cases) == 12
     assert {c.sweep_axis for c in cases} == {
         "baseline",
+        "dataset_scale",
         "shard_size",
         "workers",
         "gcs_read_mode",

@@ -80,3 +80,9 @@ scenarios:
 
       # Image decode overhead.
       - {axis: "decode", decode: true, enabled: false}
+
+      # 10x corpus (~60 GB) at the same ~95 MB shard size, so an epoch lasts tens of
+      # seconds and one slow rank cannot dominate it. Run with the two fastest read
+      # strategies above; used to compare storage tiers (e.g. Regional vs Rapid Cache).
+      - {axis: "dataset_scale", file_count: 640, read_buffer_bytes: 8388608}
+      - {axis: "dataset_scale", file_count: 640, gcs_read_mode: "whole_object"}

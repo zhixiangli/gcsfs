@@ -147,3 +147,21 @@ def test_spawn_rank_epochs_reduces_results_and_uses_slowest_build():
     result = driver.spawn_rank_epochs(_rank_result_probe, "unused", params)
 
     assert result == ([4.0], [15], 1.9, 2.0)
+
+
+def test_rank_epoch_seconds_sorts_each_epochs_rank_durations():
+    results = [
+        ([(0.0, 3.0, 10), (5.0, 6.0, 10)], 0.5),
+        ([(0.5, 1.5, 10), (5.0, 9.0, 10)], 0.5),
+    ]
+
+    assert driver.rank_epoch_seconds(results, rounds=2) == [[1.0, 3.0], [1.0, 4.0]]
+
+
+def test_spawn_rank_epochs_prints_per_rank_epoch_seconds(capsys):
+    params = SimpleNamespace(world_size=2, rounds=1)
+
+    driver.spawn_rank_epochs(_rank_result_probe, "unused", params)
+
+    out = capsys.readouterr().out
+    assert "rank_epoch_seconds epoch=1 ranks=[2.000, 3.000] max/min=1.50" in out

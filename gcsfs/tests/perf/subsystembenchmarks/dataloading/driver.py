@@ -97,6 +97,24 @@ def reduce_split(results, rounds):
     return durations, rows_list, ttfb
 
 
+def rank_epoch_seconds(results, rounds):
+    """Return each epoch's per-rank durations, sorted ascending."""
+    return [
+        sorted(res[0][e][1] - res[0][e][0] for res in results) for e in range(rounds)
+    ]
+
+
+def _print_rank_epoch_seconds(results, rounds):
+    """Log per-rank epoch durations; the epoch wall time is decided by the slowest rank."""
+    for epoch, seconds in enumerate(rank_epoch_seconds(results, rounds), start=1):
+        ratio = seconds[-1] / seconds[0] if seconds[0] > 0 else float("inf")
+        ranks = ", ".join(f"{s:.3f}" for s in seconds)
+        print(
+            f"rank_epoch_seconds epoch={epoch} ranks=[{ranks}] max/min={ratio:.2f}",
+            flush=True,
+        )
+
+
 def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):
     """Spawn rank processes and reduce epoch metrics and dataset build time."""
     import torch.multiprocessing as mp
@@ -118,6 +136,7 @@ def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):
             join=True,
         )
         results = [queue.get() for _ in range(params.world_size)]
+    _print_rank_epoch_seconds(results, params.rounds)
     durations, rows, ttfb = reduce_split(results, params.rounds)
     return durations, rows, ttfb, max(result[2] for result in results)
 
