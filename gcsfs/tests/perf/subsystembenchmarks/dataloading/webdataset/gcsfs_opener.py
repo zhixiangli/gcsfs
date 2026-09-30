@@ -24,7 +24,13 @@ def _fs():
     import gcsfs
 
     # One TraceConfig per process keeps fsspec's instance cache (and so one session).
-    return gcsfs.GCSFileSystem(session_kwargs={"trace_configs": [slow_request_trace()]})
+    return gcsfs.GCSFileSystem(
+        session_kwargs={
+            "trace_configs": [slow_request_trace()],
+            # EXPERIMENT (H1): no connection reuse.
+            "headers": {"Connection": "close"},
+        }
+    )
 
 
 # A single GET slower than this is logged with its phase breakdown.
