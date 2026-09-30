@@ -231,3 +231,59 @@ def test_gcsfs_retries_are_surfaced_after_register(capsys):
     out = capsys.readouterr().out
     assert "gcsfs_retry" in out and "boom" in out
     assert "noise" not in out
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_slow_request_is_broken_down_into_queue_connect_ttfb_and_body(
+    monkeypatch, capsys
+):
+    from types import SimpleNamespace
+
+    pytest.importorskip("aiohttp")
+    trace = gcsfs_opener.slow_request_trace()
+    ctx = SimpleNamespace()
+    params = SimpleNamespace(
+        method="GET", url="https://storage.googleapis.com/b/o", headers={"Range": "bytes=0-9"}
+    )
+    # start 0; queued 0 -> 1; connect 1 -> 1.5; headers at 6; body done at 9.
+    _clock(monkeypatch, 0.0, 0.0, 1.0, 1.0, 1.5, 6.0, 9.0)
+    _run(trace.on_request_start[0](None, ctx, params))
+    _run(trace.on_connection_queued_start[0](None, ctx, None))
+    _run(trace.on_connection_queued_end[0](None, ctx, None))
+    _run(trace.on_connection_create_start[0](None, ctx, None))
+    _run(trace.on_connection_create_end[0](None, ctx, None))
+    _run(trace.on_request_end[0](None, ctx, params))
+    _run(trace.on_response_chunk_received[0](None, ctx, params))
+
+    out = capsys.readouterr().out
+    assert (
+        "slow_request method=GET range=bytes=0-9 seconds=9.00 queued=1.00 "
+        "connect=0.50 ttfb=6.00 body=3.00"
+    ) in out
+
+
+def test_fast_request_prints_nothing(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    pytest.importorskip("aiohttp")
+    trace = gcsfs_opener.slow_request_trace()
+    ctx = SimpleNamespace()
+    params = SimpleNamespace(method="GET", url="u", headers={})
+    _clock(monkeypatch, 0.0, 0.1, 0.2)
+    _run(trace.on_request_start[0](None, ctx, params))
+    _run(trace.on_request_end[0](None, ctx, params))
+    _run(trace.on_response_chunk_received[0](None, ctx, params))
+
+    assert "slow_request" not in capsys.readouterr().out
+
+
+def test_opener_filesystem_carries_the_trace_and_is_reused():
+    pytest.importorskip("aiohttp")
+    fs = gcsfs_opener._fs()
+    assert fs.session_kwargs["trace_configs"] == [gcsfs_opener.slow_request_trace()]
+    assert gcsfs_opener._fs() is fs

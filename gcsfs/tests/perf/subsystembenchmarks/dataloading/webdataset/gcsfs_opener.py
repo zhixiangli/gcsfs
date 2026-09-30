@@ -1,5 +1,6 @@
 """Routes WebDataset gs:// reads through gcsfs via environment configuration."""
 
+import functools
 import io
 import logging
 import os
@@ -22,7 +23,71 @@ READ_BUFFER_ENV = "GCSFS_SUBSYSTEM_WDS_READ_BUFFER"
 def _fs():
     import gcsfs
 
-    return gcsfs.GCSFileSystem()
+    # One TraceConfig per process keeps fsspec's instance cache (and so one session).
+    return gcsfs.GCSFileSystem(session_kwargs={"trace_configs": [slow_request_trace()]})
+
+
+# A single GET slower than this is logged with its phase breakdown.
+SLOW_REQUEST_SECONDS = 3.0
+
+
+@functools.lru_cache(maxsize=None)
+def slow_request_trace():
+    """aiohttp TraceConfig printing queue/connect/ttfb/body times of slow requests."""
+    import aiohttp
+
+    trace = aiohttp.TraceConfig()
+
+    async def request_start(session, ctx, params):
+        ctx.start = _now()
+        ctx.queued = ctx.connect = 0.0
+        ctx.headers_at = None
+        ctx.range = params.headers.get("Range", "-")
+
+    async def queued_start(session, ctx, params):
+        ctx.queued_from = _now()
+
+    async def queued_end(session, ctx, params):
+        ctx.queued += _now() - ctx.queued_from
+
+    async def create_start(session, ctx, params):
+        ctx.connect_from = _now()
+
+    async def create_end(session, ctx, params):
+        ctx.connect += _now() - ctx.connect_from
+
+    async def request_end(session, ctx, params):
+        ctx.headers_at = _now()
+
+    async def body_done(session, ctx, params):
+        end = _now()
+        if ctx.headers_at is None or end - ctx.start < SLOW_REQUEST_SECONDS:
+            return
+        print(
+            f"slow_request method={params.method} range={ctx.range} "
+            f"seconds={end - ctx.start:.2f} queued={ctx.queued:.2f} "
+            f"connect={ctx.connect:.2f} ttfb={ctx.headers_at - ctx.start:.2f} "
+            f"body={end - ctx.headers_at:.2f} pid={os.getpid()}",
+            flush=True,
+        )
+
+    async def request_exception(session, ctx, params):
+        print(
+            f"slow_request_error method={params.method} range={ctx.range} "
+            f"seconds={_now() - ctx.start:.2f} error={params.exception!r} "
+            f"pid={os.getpid()}",
+            flush=True,
+        )
+
+    trace.on_request_start.append(request_start)
+    trace.on_connection_queued_start.append(queued_start)
+    trace.on_connection_queued_end.append(queued_end)
+    trace.on_connection_create_start.append(create_start)
+    trace.on_connection_create_end.append(create_end)
+    trace.on_request_end.append(request_end)
+    trace.on_response_chunk_received.append(body_done)
+    trace.on_request_exception.append(request_exception)
+    return trace
 
 
 def current_read_mode():
