@@ -1,7 +1,9 @@
 """Routes WebDataset gs:// reads through gcsfs via environment configuration."""
 
 import io
+import logging
 import os
+import time
 
 READAHEAD_BLOCK_SIZE = 32 * 2**20
 
@@ -77,21 +79,116 @@ def _buffered(handle, buffer_bytes):
     return io.BufferedReader(handle, buffer_size=buffer_bytes)
 
 
+# A shard slower than this is logged: at ~95 MB/shard even 10 MB/s finishes in time.
+SLOW_SHARD_SECONDS = 10.0
+
+
+def _now():
+    return time.monotonic()
+
+
+class _TimedShard:
+    """Read-through proxy that logs a shard whose open-to-last-read time is slow.
+
+    WebDataset drops the stream without closing it, so the report fires on close()
+    or garbage collection, whichever comes first, and times up to the last read.
+    """
+
+    def __init__(self, stream, url, read_mode, start):
+        self.stream = stream
+        self._url = url
+        self._mode = read_mode
+        self._start = start
+        self._first = None
+        self._last = start
+        self._bytes = 0
+        self._max_read = 0.0
+        self._reported = False
+
+    def read(self, *args):
+        begin = _now()
+        data = self.stream.read(*args)
+        end = _now()
+        if self._first is None:
+            self._first = begin
+        self._last = end
+        self._bytes += len(data)
+        self._max_read = max(self._max_read, end - begin)
+        return data
+
+    def _report(self):
+        if self._reported:
+            return
+        self._reported = True
+        seconds = self._last - self._start
+        if seconds < SLOW_SHARD_SECONDS:
+            return
+        first = self._first if self._first is not None else self._last
+        print(
+            f"slow_shard url={self._url} mode={self._mode} seconds={seconds:.2f} "
+            f"open_seconds={first - self._start:.2f} bytes={self._bytes} "
+            f"max_read_seconds={self._max_read:.2f} pid={os.getpid()}",
+            flush=True,
+        )
+
+    def close(self):
+        self._report()
+        self.stream.close()
+
+    def __del__(self):
+        try:
+            self._report()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
 def gopen_gcsfs(url, mode="rb", bufsize=8192, **kw):
     """WebDataset gopen handler for gs:// URLs (ignores pipe bufsize hint)."""
-    return open_url(
+    read_mode = current_read_mode()
+    start = _now()
+    stream = open_url(
         url,
         mode,
-        read_mode=current_read_mode(),
+        read_mode=read_mode,
         concurrency=current_read_concurrency(),
         buffer_bytes=current_read_buffer_bytes(),
     )
+    return _TimedShard(stream, url, read_mode, start)
+
+
+class _RetryPrinter(logging.Handler):
+    """Prints gcsfs retry messages, which gcsfs only logs at DEBUG."""
+
+    def filter(self, record):
+        message = record.getMessage()
+        return "retrying" in message or "out of retries" in message
+
+    def emit(self, record):
+        print(f"gcsfs_retry pid={record.process} {record.getMessage()}", flush=True)
+
+
+def _surface_gcsfs_retries():
+    logger = logging.getLogger("gcsfs")
+    if any(isinstance(h, _RetryPrinter) for h in logger.handlers):
+        return
+    logger.addHandler(_RetryPrinter(level=logging.DEBUG))
+    logger.setLevel(logging.DEBUG)
 
 
 def register():
     import webdataset as wds
 
     wds.gopen_schemes["gs"] = gopen_gcsfs
+    _surface_gcsfs_retries()
 
 
 def is_registered():

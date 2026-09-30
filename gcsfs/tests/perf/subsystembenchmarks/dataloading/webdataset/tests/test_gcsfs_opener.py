@@ -116,7 +116,7 @@ def test_read_buffer_travels_from_the_environment(monkeypatch):
     monkeypatch.setenv(gcsfs_opener.READ_MODE_ENV, "default")
     monkeypatch.setenv(gcsfs_opener.READ_BUFFER_ENV, str(4 << 20))
     stream = gcsfs_opener.gopen_gcsfs("gs://b/s.tar", "rb", 8192)
-    assert isinstance(stream, io.BufferedReader)
+    assert isinstance(stream.stream, io.BufferedReader)
 
 
 def test_unknown_read_mode_is_rejected():
@@ -184,3 +184,50 @@ def test_read_concurrency_travels_from_the_environment(monkeypatch):
     monkeypatch.setenv(gcsfs_opener.READ_CONCURRENCY_ENV, "16")
     gcsfs_opener.gopen_gcsfs("gs://b/s.tar", "rb", 8192)
     assert fs.calls[0][3]["concurrency"] == 16
+
+
+def _clock(monkeypatch, *ticks):
+    it = iter(ticks)
+    monkeypatch.setattr(gcsfs_opener, "_now", lambda: next(it))
+
+
+def test_slow_shard_is_reported_with_its_url_and_longest_read(monkeypatch, capsys):
+    fs = FakeFS()
+    monkeypatch.setattr(gcsfs_opener, "_fs", lambda: fs)
+    monkeypatch.setenv(gcsfs_opener.READ_MODE_ENV, "default")
+    # open at 0; read() spans 1 -> 13.
+    _clock(monkeypatch, 0.0, 1.0, 13.0)
+
+    stream = gcsfs_opener.gopen_gcsfs("gs://b/s.tar", "rb", 8192)
+    assert stream.read() == b"payload"
+    stream.close()
+
+    out = capsys.readouterr().out
+    assert "slow_shard url=gs://b/s.tar mode=default seconds=13.00" in out
+    assert "open_seconds=1.00 bytes=7 max_read_seconds=12.00" in out
+
+
+def test_fast_shard_prints_nothing(monkeypatch, capsys):
+    fs = FakeFS()
+    monkeypatch.setattr(gcsfs_opener, "_fs", lambda: fs)
+    monkeypatch.setenv(gcsfs_opener.READ_MODE_ENV, "whole_object")
+    _clock(monkeypatch, 0.0, 0.5, 0.6)
+
+    with gcsfs_opener.gopen_gcsfs("gs://b/s.tar", "rb", 8192) as stream:
+        assert stream.read() == b"payload"
+
+    assert "slow_shard" not in capsys.readouterr().out
+
+
+def test_gcsfs_retries_are_surfaced_after_register(capsys):
+    import logging
+
+    pytest.importorskip("webdataset")
+    gcsfs_opener.register()
+    logger = logging.getLogger("gcsfs")
+    logger.debug("GET: noise that must stay hidden")
+    logger.debug("_cat_file retrying after exception: boom")
+
+    out = capsys.readouterr().out
+    assert "gcsfs_retry" in out and "boom" in out
+    assert "noise" not in out
