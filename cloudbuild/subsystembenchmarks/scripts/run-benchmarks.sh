@@ -7,8 +7,11 @@ source env/bin/activate
 
 export PYTHONPATH="$HOME/gcsfs"
 
-# TCP diagnostic sampler: sample ss -Htin for storage.googleapis.com (port 443) every 2s
-# Captures congestion window, RTT, retransmits, delivery rate, app_limited, etc.
+# TCP diagnostic sampler: sample ss -Htin for storage.googleapis.com (port 443) every 2s.
+# Note: cwnd, retrans, delivery_rate, app_limited and busy describe this host's *sending*
+# (small HTTP requests). For download diagnosis use the receive-side fields:
+# bytes_received deltas, rcv_rtt, rcv_space, rcv_ssthresh, rcv_ooopack, and recvq
+# (bytes received but not yet read by the application).
 python -u -c '
 import datetime, subprocess, time
 
@@ -20,7 +23,7 @@ def sample_once():
     if proc.returncode != 0:
         return
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    cur_lport, cur_peer = None, None
+    cur_lport, cur_peer, cur_q = None, None, ""
     for line in proc.stdout.splitlines():
         if not line:
             continue
@@ -29,9 +32,10 @@ def sample_once():
             if len(parts) >= 4:
                 cur_lport = parts[2].rsplit(":", 1)[-1]
                 cur_peer = parts[3]
+                cur_q = f"recvq={parts[0]} sendq={parts[1]}"
         else:
             if cur_lport:
-                print(f"tcp_sample ts={ts} lport={cur_lport} peer={cur_peer} {line.strip()}", flush=True)
+                print(f"tcp_sample ts={ts} lport={cur_lport} peer={cur_peer} {cur_q} {line.strip()}", flush=True)
                 cur_lport = None
 
 while True:

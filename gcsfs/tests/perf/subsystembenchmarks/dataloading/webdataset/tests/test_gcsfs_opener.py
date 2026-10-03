@@ -310,37 +310,76 @@ def test_opener_filesystem_carries_the_trace_and_is_reused():
     assert gcsfs_opener._fs() is fs
 
 
-def test_port_tracker_captures_local_port_on_connector():
+def test_port_tracker_wraps_connect_and_records_local_port(monkeypatch):
     from types import SimpleNamespace
 
     pytest.importorskip("aiohttp")
     import aiohttp
 
+    class FakeTransport:
+        def get_extra_info(self, name):
+            return ("127.0.0.1", 49152) if name == "sockname" else None
+
+    fake_conn = SimpleNamespace(transport=FakeTransport())
+    calls = []
+
+    async def fake_connect(self, req, traces, timeout):
+        calls.append((self, req, traces, timeout))
+        return fake_conn
+
+    # Install the tracker on top of a fake original connect.
+    monkeypatch.setattr(aiohttp.TCPConnector, "connect", fake_connect)
+    monkeypatch.setattr(
+        aiohttp.TCPConnector, "_port_tracking_installed", False, raising=False
+    )
+    gcsfs_opener._install_port_tracker()
+    assert aiohttp.TCPConnector.connect is not fake_connect
+
+    ctx = SimpleNamespace()
+    traces = [SimpleNamespace(_trace_config_ctx=ctx)]
+    conn = _run(aiohttp.TCPConnector.connect("self", "req", traces, "timeout"))
+
+    assert conn is fake_conn
+    assert calls == [("self", "req", traces, "timeout")]
+    assert ctx.lport == 49152
+
+
+def test_slow_request_reports_the_real_local_port_of_fresh_and_reused_connections(
+    monkeypatch, capsys
+):
+    pytest.importorskip("aiohttp")
+    import aiohttp
+    from aiohttp import web
+
+    monkeypatch.setattr(gcsfs_opener, "SLOW_REQUEST_SECONDS", 0.0)
+    trace = gcsfs_opener.slow_request_trace()
+    client_ports = []
+
+    async def handler(request):
+        client_ports.append(request.transport.get_extra_info("peername")[1])
+        return web.Response(body=b"x" * 1024)
+
     async def _test():
-        gcsfs_opener._install_port_tracker()
-
-        class FakeTransport:
-            def get_extra_info(self, name):
-                if name == "sockname":
-                    return ("127.0.0.1", 49152)
-                return None
-
-        class FakeConn:
-            transport = FakeTransport()
-
-        ctx = SimpleNamespace()
-        trace_obj = SimpleNamespace(_trace_config_ctx=ctx)
-
-        # Call the monkeypatched connect method directly
-        connector = aiohttp.TCPConnector()
+        app = web.Application()
+        app.router.add_get("/o", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
         try:
-            # Test that tracking populates ctx.lport
-            sockname = FakeTransport().get_extra_info("sockname")
-            lport = sockname[1]
-            for t in [trace_obj]:
-                t._trace_config_ctx.lport = lport
-            assert ctx.lport == 49152
+            async with aiohttp.ClientSession(trace_configs=[trace]) as session:
+                for _ in range(2):
+                    async with session.get(f"http://127.0.0.1:{port}/o") as resp:
+                        await resp.read()
         finally:
-            await connector.close()
+            await runner.cleanup()
 
     _run(_test())
+
+    out = capsys.readouterr().out
+    # Second request reuses the pooled connection, so both share one local port.
+    assert len(client_ports) == 2 and client_ports[0] == client_ports[1]
+    lines = [line for line in out.splitlines() if line.startswith("slow_request ")]
+    assert lines and all(f"port={client_ports[0]}" in line for line in lines)
+    assert "port=-" not in out
