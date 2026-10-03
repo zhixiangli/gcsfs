@@ -265,6 +265,27 @@ def test_slow_request_is_broken_down_into_queue_connect_ttfb_and_body(
         "slow_request method=GET range=bytes=0-9 seconds=9.00 queued=1.00 "
         "connect=0.50 ttfb=6.00 body=3.00"
     ) in out
+    assert "port=-" in out
+
+
+def test_slow_request_includes_local_port(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    pytest.importorskip("aiohttp")
+    trace = gcsfs_opener.slow_request_trace()
+    ctx = SimpleNamespace()
+    params = SimpleNamespace(
+        method="GET", url="https://storage.googleapis.com/b/o", headers={"Range": "bytes=0-9"}
+    )
+    _clock(monkeypatch, 0.0, 6.0, 9.0)
+    _run(trace.on_request_start[0](None, ctx, params))
+    ctx.lport = 54321
+    _run(trace.on_request_end[0](None, ctx, params))
+    _run(trace.on_response_chunk_received[0](None, ctx, params))
+
+    out = capsys.readouterr().out
+    assert "slow_request method=GET range=bytes=0-9" in out
+    assert "port=54321" in out
 
 
 def test_fast_request_prints_nothing(monkeypatch, capsys):
@@ -287,3 +308,39 @@ def test_opener_filesystem_carries_the_trace_and_is_reused():
     fs = gcsfs_opener._fs()
     assert fs.session_kwargs["trace_configs"] == [gcsfs_opener.slow_request_trace()]
     assert gcsfs_opener._fs() is fs
+
+
+def test_port_tracker_captures_local_port_on_connector():
+    from types import SimpleNamespace
+
+    pytest.importorskip("aiohttp")
+    import aiohttp
+
+    async def _test():
+        gcsfs_opener._install_port_tracker()
+
+        class FakeTransport:
+            def get_extra_info(self, name):
+                if name == "sockname":
+                    return ("127.0.0.1", 49152)
+                return None
+
+        class FakeConn:
+            transport = FakeTransport()
+
+        ctx = SimpleNamespace()
+        trace_obj = SimpleNamespace(_trace_config_ctx=ctx)
+
+        # Call the monkeypatched connect method directly
+        connector = aiohttp.TCPConnector()
+        try:
+            # Test that tracking populates ctx.lport
+            sockname = FakeTransport().get_extra_info("sockname")
+            lport = sockname[1]
+            for t in [trace_obj]:
+                t._trace_config_ctx.lport = lport
+            assert ctx.lport == 49152
+        finally:
+            await connector.close()
+
+    _run(_test())

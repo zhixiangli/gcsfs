@@ -31,11 +31,39 @@ def _fs():
 SLOW_REQUEST_SECONDS = 3.0
 
 
+def _install_port_tracker():
+    """Wrap TCPConnector.connect to attach the connection local port to trace context."""
+    import aiohttp
+
+    if getattr(aiohttp.TCPConnector, "_port_tracking_installed", False):
+        return
+
+    _orig_connect = aiohttp.TCPConnector.connect
+
+    async def _tracking_connect(self, req, traces, timeout):
+        conn = await _orig_connect(self, req, traces, timeout)
+        try:
+            sockname = conn.transport.get_extra_info("sockname") if conn.transport else None
+            lport = sockname[1] if sockname and len(sockname) > 1 else None
+            if traces and lport:
+                for t in traces:
+                    ctx = getattr(t, "_trace_config_ctx", None)
+                    if ctx is not None:
+                        ctx.lport = lport
+        except Exception:
+            pass
+        return conn
+
+    aiohttp.TCPConnector.connect = _tracking_connect
+    aiohttp.TCPConnector._port_tracking_installed = True
+
+
 @functools.lru_cache(maxsize=None)
 def slow_request_trace():
     """aiohttp TraceConfig printing queue/connect/ttfb/body times of slow requests."""
     import aiohttp
 
+    _install_port_tracker()
     trace = aiohttp.TraceConfig()
 
     async def request_start(session, ctx, params):
@@ -43,6 +71,7 @@ def slow_request_trace():
         ctx.queued = ctx.connect = 0.0
         ctx.headers_at = None
         ctx.range = params.headers.get("Range", "-")
+        ctx.lport = None
 
     async def queued_start(session, ctx, params):
         ctx.queued_from = _now()
@@ -58,24 +87,37 @@ def slow_request_trace():
 
     async def request_end(session, ctx, params):
         ctx.headers_at = _now()
+        if getattr(ctx, "lport", None) is None:
+            try:
+                proto = getattr(params.response, "_protocol", None)
+                trans = getattr(proto, "transport", None) if proto else None
+                sockname = trans.get_extra_info("sockname") if trans else None
+                if sockname and len(sockname) > 1:
+                    ctx.lport = sockname[1]
+            except Exception:
+                pass
 
     async def body_done(session, ctx, params):
         end = _now()
         if ctx.headers_at is None or end - ctx.start < SLOW_REQUEST_SECONDS:
             return
+        port = getattr(ctx, "lport", None)
+        port_str = f" port={port}" if port is not None else " port=-"
         print(
             f"slow_request method={params.method} range={ctx.range} "
             f"seconds={end - ctx.start:.2f} queued={ctx.queued:.2f} "
             f"connect={ctx.connect:.2f} ttfb={ctx.headers_at - ctx.start:.2f} "
-            f"body={end - ctx.headers_at:.2f} pid={os.getpid()}",
+            f"body={end - ctx.headers_at:.2f} pid={os.getpid()}{port_str}",
             flush=True,
         )
 
     async def request_exception(session, ctx, params):
+        port = getattr(ctx, "lport", None)
+        port_str = f" port={port}" if port is not None else " port=-"
         print(
             f"slow_request_error method={params.method} range={ctx.range} "
             f"seconds={_now() - ctx.start:.2f} error={params.exception!r} "
-            f"pid={os.getpid()}",
+            f"pid={os.getpid()}{port_str}",
             flush=True,
         )
 
@@ -252,6 +294,7 @@ def _surface_gcsfs_retries():
 def register():
     import webdataset as wds
 
+    _install_port_tracker()
     wds.gopen_schemes["gs"] = gopen_gcsfs
     _surface_gcsfs_retries()
 
