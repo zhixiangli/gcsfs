@@ -50,7 +50,9 @@ def _install_port_tracker():
     async def _tracking_connect(self, req, traces, timeout):
         conn = await _orig_connect(self, req, traces, timeout)
         try:
-            sockname = conn.transport.get_extra_info("sockname") if conn.transport else None
+            sockname = (
+                conn.transport.get_extra_info("sockname") if conn.transport else None
+            )
             lport = sockname[1] if sockname and len(sockname) > 1 else None
             if traces and lport:
                 for t in traces:

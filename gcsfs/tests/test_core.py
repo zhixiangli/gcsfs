@@ -3052,9 +3052,7 @@ def test_mtls_user_connector_kept(client_cert_config):
 def test_connector_kwargs_passed_to_tcp_connector():
     fs = GCSFileSystem(
         token="anon",
-        session_kwargs={
-            "connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0}
-        },
+        session_kwargs={"connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0}},
     )
     skw = _session_kwargs(fs)
     assert "connector_kwargs" not in skw
@@ -3063,6 +3061,41 @@ def test_connector_kwargs_passed_to_tcp_connector():
     assert connector._keepalive_timeout == 5.0
     assert connector.limit == 0
 
+
+def test_no_connector_kwargs_keeps_default_session(mtls_env):
+    session_kwargs = {"trust_env": True}
+    fs = GCSFileSystem(token="anon", session_kwargs=session_kwargs)
+    assert _session_kwargs(fs) == {"trust_env": True}
+    assert session_kwargs == {"trust_env": True}
+
+
+def test_connector_kwargs_not_mutated(mtls_env):
+    session_kwargs = {"connector_kwargs": {"keepalive_timeout": 5.0}}
+    fs = GCSFileSystem(token="anon", session_kwargs=session_kwargs)
+    _session_kwargs(fs)
+    assert session_kwargs == {"connector_kwargs": {"keepalive_timeout": 5.0}}
+
+
+def test_mtls_connector_kwargs_keep_client_cert(client_cert_config, mtls_env):
+    fs = GCSFileSystem(
+        token="anon",
+        session_kwargs={"connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0}},
+    )
+    connector = _session_kwargs(fs)["connector"]
+    assert isinstance(connector._ssl, ssl.SSLContext)
+    assert connector._keepalive_timeout == 5.0
+    assert connector.limit == 0
+
+
+def test_user_connector_wins_over_connector_kwargs(mtls_env):
+    connector = object()
+    fs = GCSFileSystem(
+        token="anon",
+        session_kwargs={"connector": connector, "connector_kwargs": {"limit": 0}},
+    )
+    skw = _session_kwargs(fs)
+    assert skw["connector"] is connector
+    assert "connector_kwargs" not in skw
 
 
 def test_mtls_session_presents_client_cert(client_cert_config, mtls_env):

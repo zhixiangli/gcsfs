@@ -550,7 +550,10 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                 ckwargs.setdefault("ssl", ssl_context)
                 kwargs = {**kwargs, "connector": aiohttp.TCPConnector(**ckwargs)}
             elif connector_kwargs is not None and "connector" not in kwargs:
-                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(**connector_kwargs)}
+                kwargs = {
+                    **kwargs,
+                    "connector": aiohttp.TCPConnector(**connector_kwargs),
+                }
             self._session = await get_client(**kwargs)
             weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous

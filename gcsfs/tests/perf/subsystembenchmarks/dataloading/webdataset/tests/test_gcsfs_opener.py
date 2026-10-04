@@ -248,7 +248,9 @@ def test_slow_request_is_broken_down_into_queue_connect_ttfb_and_body(
     trace = gcsfs_opener.slow_request_trace()
     ctx = SimpleNamespace()
     params = SimpleNamespace(
-        method="GET", url="https://storage.googleapis.com/b/o", headers={"Range": "bytes=0-9"}
+        method="GET",
+        url="https://storage.googleapis.com/b/o",
+        headers={"Range": "bytes=0-9"},
     )
     # start 0; queued 0 -> 1; connect 1 -> 1.5; headers at 6; body done at 9.
     _clock(monkeypatch, 0.0, 0.0, 1.0, 1.0, 1.5, 6.0, 9.0)
@@ -275,7 +277,9 @@ def test_slow_request_includes_local_port(monkeypatch, capsys):
     trace = gcsfs_opener.slow_request_trace()
     ctx = SimpleNamespace()
     params = SimpleNamespace(
-        method="GET", url="https://storage.googleapis.com/b/o", headers={"Range": "bytes=0-9"}
+        method="GET",
+        url="https://storage.googleapis.com/b/o",
+        headers={"Range": "bytes=0-9"},
     )
     _clock(monkeypatch, 0.0, 6.0, 9.0)
     _run(trace.on_request_start[0](None, ctx, params))
@@ -420,4 +424,3 @@ def test_timed_shard_closes_underlying_stream_on_del():
     assert shard.read(2) == b"da"
     del shard
     assert raw.closed_by_caller
-
