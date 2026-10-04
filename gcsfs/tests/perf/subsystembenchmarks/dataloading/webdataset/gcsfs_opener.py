@@ -28,10 +28,47 @@ def _fs():
     # multi-round barriers are pruned before reuse, and sets limit to 0 (unlimited).
     return gcsfs.GCSFileSystem(
         session_kwargs={
-            "trace_configs": [slow_request_trace()],
+            "trace_configs": [slow_request_trace(), connection_recycle_trace()],
             "connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0},
         }
     )
+
+
+# A pooled connection older than this is closed once its current response is read.
+# Each DataLoader worker reuses the same few connections for a whole epoch, so a
+# single slow connection (a few MB/s while the others run at hundreds) would gate
+# every shard that worker reads, and through in-order batching, its whole rank.
+CONNECTION_MAX_AGE_SECONDS = 2.0
+
+
+@functools.lru_cache(maxsize=None)
+def connection_recycle_trace():
+    """aiohttp TraceConfig that retires connections older than CONNECTION_MAX_AGE_SECONDS."""
+    import weakref
+
+    import aiohttp
+
+    born = weakref.WeakKeyDictionary()
+    trace = aiohttp.TraceConfig()
+
+    async def request_end(session, ctx, params):
+        connection = getattr(params.response, "connection", None)
+        protocol = getattr(connection, "protocol", None)
+        if protocol is None:
+            # A body that arrived with its headers has already released the
+            # connection to the pool; marking it still retires it on its next release.
+            protocol = getattr(params.response, "_protocol", None)
+        if protocol is None:
+            return
+        now = _now()
+        first_seen = born.setdefault(protocol, now)
+        if now - first_seen >= CONNECTION_MAX_AGE_SECONDS:
+            # Marks the protocol so the connector closes it on release instead of
+            # pooling it; the response body in flight is still read in full.
+            protocol.force_close()
+
+    trace.on_request_end.append(request_end)
+    return trace
 
 
 # A single GET slower than this is logged with its phase breakdown.

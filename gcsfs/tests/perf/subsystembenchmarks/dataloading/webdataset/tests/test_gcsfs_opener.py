@@ -310,12 +310,83 @@ def test_fast_request_prints_nothing(monkeypatch, capsys):
 def test_opener_filesystem_carries_the_trace_and_is_reused():
     pytest.importorskip("aiohttp")
     fs = gcsfs_opener._fs()
-    assert fs.session_kwargs["trace_configs"] == [gcsfs_opener.slow_request_trace()]
+    assert fs.session_kwargs["trace_configs"] == [
+        gcsfs_opener.slow_request_trace(),
+        gcsfs_opener.connection_recycle_trace(),
+    ]
     assert fs.session_kwargs["connector_kwargs"] == {
         "keepalive_timeout": 5.0,
         "limit": 0,
     }
     assert gcsfs_opener._fs() is fs
+
+
+def _client_ports_over_requests(trace, requests):
+    """Issue sequential GETs against a local server; return each request's client port."""
+    import asyncio
+
+    import aiohttp
+    from aiohttp import web
+
+    client_ports = []
+
+    async def handler(request):
+        client_ports.append(request.transport.get_extra_info("peername")[1])
+        # Headers first, body later: like a large shard GET, the connection is still
+        # attached to the response when on_request_end fires.
+        resp = web.StreamResponse()
+        resp.content_length = 1024
+        await resp.prepare(request)
+        await asyncio.sleep(0.02)
+        await resp.write(b"x" * 1024)
+        await resp.write_eof()
+        return resp
+
+    async def _test():
+        app = web.Application()
+        app.router.add_get("/o", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with aiohttp.ClientSession(trace_configs=[trace]) as session:
+                for _ in range(requests):
+                    async with session.get(f"http://127.0.0.1:{port}/o") as resp:
+                        assert await resp.read() == b"x" * 1024
+        finally:
+            await runner.cleanup()
+
+    _run(_test())
+    return client_ports
+
+
+def test_young_connection_is_reused():
+    pytest.importorskip("aiohttp")
+    gcsfs_opener.connection_recycle_trace.cache_clear()
+    try:
+        ports = _client_ports_over_requests(gcsfs_opener.connection_recycle_trace(), 3)
+    finally:
+        gcsfs_opener.connection_recycle_trace.cache_clear()
+    assert len(ports) == 3 and len(set(ports)) == 1
+
+
+def test_aged_connection_is_retired_after_its_response(monkeypatch):
+    pytest.importorskip("aiohttp")
+    # Each request_end sees the clock advance past the max age.
+    ticks = iter(range(0, 1000, 10))
+    monkeypatch.setattr(gcsfs_opener, "_now", lambda: float(next(ticks)))
+    gcsfs_opener.connection_recycle_trace.cache_clear()
+    try:
+        ports = _client_ports_over_requests(gcsfs_opener.connection_recycle_trace(), 3)
+    finally:
+        gcsfs_opener.connection_recycle_trace.cache_clear()
+    # First use stamps the connection; the next response retires it, so the third
+    # request needs a fresh connection.
+    assert len(ports) == 3
+    assert ports[0] == ports[1]
+    assert ports[2] != ports[1]
 
 
 def test_port_tracker_wraps_connect_and_records_local_port(monkeypatch):
