@@ -307,6 +307,10 @@ def test_opener_filesystem_carries_the_trace_and_is_reused():
     pytest.importorskip("aiohttp")
     fs = gcsfs_opener._fs()
     assert fs.session_kwargs["trace_configs"] == [gcsfs_opener.slow_request_trace()]
+    assert fs.session_kwargs["connector_kwargs"] == {
+        "keepalive_timeout": 5.0,
+        "limit": 0,
+    }
     assert gcsfs_opener._fs() is fs
 
 
@@ -383,3 +387,37 @@ def test_slow_request_reports_the_real_local_port_of_fresh_and_reused_connection
     lines = [line for line in out.splitlines() if line.startswith("slow_request ")]
     assert lines and all(f"port={client_ports[0]}" in line for line in lines)
     assert "port=-" not in out
+
+
+def test_timed_shard_closes_underlying_stream_on_eof():
+    class ClosableBytesIO(io.BytesIO):
+        closed_by_caller = False
+
+        def close(self):
+            self.closed_by_caller = True
+            super().close()
+
+    raw = ClosableBytesIO(b"data")
+    shard = gcsfs_opener._TimedShard(raw, "gs://b/s.tar", "default", 0.0)
+    assert shard.read(2) == b"da"
+    assert not raw.closed_by_caller
+    assert shard.read(2) == b"ta"
+    assert not raw.closed_by_caller
+    assert shard.read() == b""
+    assert raw.closed_by_caller
+
+
+def test_timed_shard_closes_underlying_stream_on_del():
+    class ClosableBytesIO(io.BytesIO):
+        closed_by_caller = False
+
+        def close(self):
+            self.closed_by_caller = True
+            super().close()
+
+    raw = ClosableBytesIO(b"data")
+    shard = gcsfs_opener._TimedShard(raw, "gs://b/s.tar", "default", 0.0)
+    assert shard.read(2) == b"da"
+    del shard
+    assert raw.closed_by_caller
+

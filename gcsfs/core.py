@@ -523,7 +523,8 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
 
     async def _set_session(self):
         if self._session is None:
-            kwargs = self.session_kwargs
+            kwargs = dict(self.session_kwargs)
+            connector_kwargs = kwargs.pop("connector_kwargs", None)
             if (
                 self._use_client_cert
                 and "connector" not in kwargs
@@ -545,7 +546,11 @@ class GCSFileSystem(DirCacheUpdater, asyn.AsyncFileSystem):
                         self._ssl_context_task = None
                 if self._session is not None:
                     return self._session
-                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(ssl=ssl_context)}
+                ckwargs = dict(connector_kwargs) if connector_kwargs else {}
+                ckwargs.setdefault("ssl", ssl_context)
+                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(**ckwargs)}
+            elif connector_kwargs is not None and "connector" not in kwargs:
+                kwargs = {**kwargs, "connector": aiohttp.TCPConnector(**connector_kwargs)}
             self._session = await get_client(**kwargs)
             weakref.finalize(
                 self, self.close_session, self.loop, self._session, self.asynchronous

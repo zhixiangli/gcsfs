@@ -24,7 +24,14 @@ def _fs():
     import gcsfs
 
     # One TraceConfig per process keeps fsspec's instance cache (and so one session).
-    return gcsfs.GCSFileSystem(session_kwargs={"trace_configs": [slow_request_trace()]})
+    # connector_kwargs sets keepalive_timeout to 5.0s so stale idle sockets during
+    # multi-round barriers are pruned before reuse, and sets limit to 0 (unlimited).
+    return gcsfs.GCSFileSystem(
+        session_kwargs={
+            "trace_configs": [slow_request_trace()],
+            "connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0},
+        }
+    )
 
 
 # A single GET slower than this is logged with its phase breakdown.
@@ -211,6 +218,7 @@ class _TimedShard:
         self._bytes = 0
         self._max_read = 0.0
         self._reported = False
+        self._closed = False
 
     def read(self, *args):
         begin = _now()
@@ -221,6 +229,8 @@ class _TimedShard:
         self._last = end
         self._bytes += len(data)
         self._max_read = max(self._max_read, end - begin)
+        if not data:
+            self.close()
         return data
 
     def _report(self):
@@ -239,12 +249,18 @@ class _TimedShard:
         )
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         self._report()
-        self.stream.close()
+        try:
+            self.stream.close()
+        except Exception:
+            pass
 
     def __del__(self):
         try:
-            self._report()
+            self.close()
         except Exception:
             pass
 

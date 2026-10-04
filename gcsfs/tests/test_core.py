@@ -3049,6 +3049,22 @@ def test_mtls_user_connector_kept(client_cert_config):
     assert _session_kwargs(fs)["connector"] is connector
 
 
+def test_connector_kwargs_passed_to_tcp_connector():
+    fs = GCSFileSystem(
+        token="anon",
+        session_kwargs={
+            "connector_kwargs": {"keepalive_timeout": 5.0, "limit": 0}
+        },
+    )
+    skw = _session_kwargs(fs)
+    assert "connector_kwargs" not in skw
+    connector = skw.get("connector")
+    assert isinstance(connector, aiohttp.TCPConnector)
+    assert connector._keepalive_timeout == 5.0
+    assert connector.limit == 0
+
+
+
 def test_mtls_session_presents_client_cert(client_cert_config, mtls_env):
     """End to end: a server that requires a client cert accepts gcsfs."""
     import http.server
