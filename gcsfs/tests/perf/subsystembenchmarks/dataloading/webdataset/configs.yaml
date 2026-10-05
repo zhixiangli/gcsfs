@@ -4,7 +4,7 @@ common:
   baseline:
     fmt: "image_tar"
     # file_count * rows_per_file = image count.
-    file_count: 64
+    file_count: 640
     rows_per_file: 784
     # Qwen2-VL default max_pixels (28 * 28 * 1280).
     pixel_budget: 1003520
@@ -43,7 +43,7 @@ scenarios:
       - {axis: "sample_shape", sample_shape: "interleaved", enabled: false}
 
       # Shard size variations at constant total image count.
-      - {axis: "shard_size", file_count: 32, rows_per_file: 1568}
+      - {axis: "shard_size", file_count: 320, rows_per_file: 1568}
       - {axis: "shard_size", file_count: 256, rows_per_file: 196, enabled: false}
       - {axis: "shard_size", file_count: 1024, rows_per_file: 49, enabled: false}
       - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254, enabled: false}
