@@ -27,10 +27,25 @@ def test_case_ids_are_unique_and_encode_the_corpus_shape():
         assert token in baseline.name, f"{token} missing from {baseline.name}"
 
 
+_FIXED_CORPUS_AXES = {
+    "shard_fixed_corpus_default",
+    "shard_fixed_corpus_buf32m",
+    "shard_fixed_corpus_whole",
+}
+_FIXED_SPW_AXES = {"shard_fixed_spw_buf32m", "shard_fixed_spw_whole"}
+
+
 def test_image_count_held_constant_except_divisibility_axis():
     for case in _cases():
+        if case.sweep_axis in _FIXED_SPW_AXES:
+            continue
         images = case.file_count * case.rows_per_file
-        expected = 50_160 if case.sweep_axis == "shard_divisibility" else 50_176
+        if case.sweep_axis == "shard_divisibility":
+            expected = 50_160
+        elif case.sweep_axis in _FIXED_CORPUS_AXES:
+            expected = 262_144
+        else:
+            expected = 50_176
         assert images == expected, f"{case.name} has {images} images"
 
 
@@ -81,8 +96,14 @@ def test_confounded_axes_keep_a_partner_row_to_compare_against():
         )
 
 
+def test_fixed_spw_shard_sweep_holds_shards_per_split():
+    for case in _cases():
+        if case.sweep_axis in _FIXED_SPW_AXES:
+            assert case.file_count == 4 * case.split_count, case.name
+
+
 def test_axis_names_are_complete():
-    assert {c.sweep_axis for c in _cases()} == {
+    assert {c.sweep_axis for c in _cases()} == _FIXED_CORPUS_AXES | _FIXED_SPW_AXES | {
         "baseline",
         "pixel_budget",
         "encoding",
@@ -107,8 +128,8 @@ def test_axis_names_are_complete():
 def test_default_run_is_the_storage_sweep():
     """Only storage-bound variants run by default; the rest are parked."""
     cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
-    assert len(cases) == 11
-    assert {c.sweep_axis for c in cases} == {
+    assert len(cases) == 44
+    assert {c.sweep_axis for c in cases} == _FIXED_CORPUS_AXES | _FIXED_SPW_AXES | {
         "baseline",
         "shard_size",
         "workers",

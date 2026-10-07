@@ -48,6 +48,47 @@ scenarios:
       - {axis: "shard_size", file_count: 1024, rows_per_file: 49, enabled: false}
       - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254, enabled: false}
 
+      # Shard size sweeps (~120 KB/sample, so rows_per_file 64..8192 is ~8 MB..~1 GB
+      # per shard). Fixed corpus: 262144 samples (~31 GB) split 4096..32 ways, i.e.
+      # 128..1 shards per split, which is the choice a user with a fixed dataset faces.
+      # Fixed shards-per-split: 128 shards (4 per split) so shard size is not confounded
+      # with shard count; the corpus grows to ~128 GB. Its 2048-row point is the
+      # fixed-corpus 128x2048 case. Each is crossed with the default, 32 MiB buffered,
+      # and whole-object read strategies.
+      - {axis: "shard_fixed_corpus_default", file_count: 4096, rows_per_file: 64}
+      - {axis: "shard_fixed_corpus_default", file_count: 1024, rows_per_file: 256}
+      - {axis: "shard_fixed_corpus_default", file_count: 512, rows_per_file: 512}
+      - {axis: "shard_fixed_corpus_default", file_count: 256, rows_per_file: 1024}
+      - {axis: "shard_fixed_corpus_default", file_count: 128, rows_per_file: 2048}
+      - {axis: "shard_fixed_corpus_default", file_count: 64, rows_per_file: 4096}
+      - {axis: "shard_fixed_corpus_default", file_count: 32, rows_per_file: 8192}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 4096, rows_per_file: 64, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 1024, rows_per_file: 256, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 512, rows_per_file: 512, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 256, rows_per_file: 1024, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 128, rows_per_file: 2048, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 64, rows_per_file: 4096, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_buf32m", file_count: 32, rows_per_file: 8192, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_corpus_whole", file_count: 4096, rows_per_file: 64, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 1024, rows_per_file: 256, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 512, rows_per_file: 512, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 256, rows_per_file: 1024, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 128, rows_per_file: 2048, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 64, rows_per_file: 4096, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_whole", file_count: 32, rows_per_file: 8192, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 64, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 256, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 512, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 1024, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 4096, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 8192, read_buffer_bytes: 33554432}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 64, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 256, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 512, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 1024, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 4096, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_spw_whole", file_count: 128, rows_per_file: 8192, gcs_read_mode: "whole_object"}
+
       # PyTorch DataLoader settings.
       - {axis: "workers", num_workers: 2, enabled: false}
       - {axis: "workers", num_workers: 8}
