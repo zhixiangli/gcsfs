@@ -76,6 +76,13 @@ scenarios:
       - {axis: "shard_fixed_corpus_whole", file_count: 128, rows_per_file: 2048, gcs_read_mode: "whole_object"}
       - {axis: "shard_fixed_corpus_whole", file_count: 64, rows_per_file: 4096, gcs_read_mode: "whole_object"}
       - {axis: "shard_fixed_corpus_whole", file_count: 32, rows_per_file: 8192, gcs_read_mode: "whole_object"}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 4096, rows_per_file: 64, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 1024, rows_per_file: 256, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 512, rows_per_file: 512, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 256, rows_per_file: 1024, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 128, rows_per_file: 2048, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 64, rows_per_file: 4096, read_buffer_bytes: 8388608}
+      - {axis: "shard_fixed_corpus_buf8m", file_count: 32, rows_per_file: 8192, read_buffer_bytes: 8388608}
       - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 64, read_buffer_bytes: 33554432}
       - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 256, read_buffer_bytes: 33554432}
       - {axis: "shard_fixed_spw_buf32m", file_count: 128, rows_per_file: 512, read_buffer_bytes: 33554432}

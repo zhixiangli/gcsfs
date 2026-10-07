@@ -29,6 +29,7 @@ def test_case_ids_are_unique_and_encode_the_corpus_shape():
 
 _FIXED_CORPUS_AXES = {
     "shard_fixed_corpus_default",
+    "shard_fixed_corpus_buf8m",
     "shard_fixed_corpus_buf32m",
     "shard_fixed_corpus_whole",
 }
@@ -128,7 +129,7 @@ def test_axis_names_are_complete():
 def test_default_run_is_the_storage_sweep():
     """Only storage-bound variants run by default; the rest are parked."""
     cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
-    assert len(cases) == 44
+    assert len(cases) == 51
     assert {c.sweep_axis for c in cases} == _FIXED_CORPUS_AXES | _FIXED_SPW_AXES | {
         "baseline",
         "shard_size",
