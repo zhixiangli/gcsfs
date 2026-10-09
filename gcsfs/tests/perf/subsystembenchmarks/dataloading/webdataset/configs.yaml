@@ -48,6 +48,23 @@ scenarios:
       - {axis: "shard_size", file_count: 1024, rows_per_file: 49, enabled: false}
       - {axis: "shard_divisibility", file_count: 40, rows_per_file: 1254, enabled: false}
 
+      # Best-config ladder: cumulative tuning steps from an untuned default to the
+      # recommended setup, on one fixed corpus (262144 samples, ~31.8 GB) so every
+      # step is directly comparable. Run once per bucket type (regional, zonal) to
+      # place the switch to Rapid anywhere on the ladder.
+      #   L0 untuned: ~31 MB shards, default gcsfs open, 4 workers, prefetch 2.
+      #   L1 + reshard to ~124 MB (256 shards, 8 per split).
+      #   L2 + 8 MiB BufferedReader (alt: whole_object).
+      #   L3 + 8 DataLoader workers per rank.
+      #   L4 + prefetch_factor 4.
+      - {axis: "best_config_ladder", file_count: 1024, rows_per_file: 256}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024, read_buffer_bytes: 8388608}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024, gcs_read_mode: "whole_object"}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024, read_buffer_bytes: 8388608, num_workers: 8}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024, gcs_read_mode: "whole_object", num_workers: 8}
+      - {axis: "best_config_ladder", file_count: 256, rows_per_file: 1024, read_buffer_bytes: 8388608, num_workers: 8, prefetch_factor: 4}
+
       # PyTorch DataLoader settings.
       - {axis: "workers", num_workers: 2, enabled: false}
       - {axis: "workers", num_workers: 8}

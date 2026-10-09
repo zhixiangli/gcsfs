@@ -30,7 +30,12 @@ def test_case_ids_are_unique_and_encode_the_corpus_shape():
 def test_image_count_held_constant_except_divisibility_axis():
     for case in _cases():
         images = case.file_count * case.rows_per_file
-        expected = 50_160 if case.sweep_axis == "shard_divisibility" else 50_176
+        if case.sweep_axis == "shard_divisibility":
+            expected = 50_160
+        elif case.sweep_axis == "best_config_ladder":
+            expected = 262_144
+        else:
+            expected = 50_176
         assert images == expected, f"{case.name} has {images} images"
 
 
@@ -101,13 +106,14 @@ def test_axis_names_are_complete():
         "gcs_read_concurrency",
         "read_buffer",
         "decode",
+        "best_config_ladder",
     }
 
 
 def test_default_run_is_the_storage_sweep():
     """Only storage-bound variants run by default; the rest are parked."""
     cases = configs.WebDatasetReadConfigurator(CONFIG).generate_cases()
-    assert len(cases) == 10
+    assert len(cases) == 17
     assert {c.sweep_axis for c in cases} == {
         "baseline",
         "shard_size",
@@ -115,6 +121,7 @@ def test_default_run_is_the_storage_sweep():
         "gcs_read_mode",
         "gcs_read_concurrency",
         "read_buffer",
+        "best_config_ladder",
     }
     assert not any(c.decode for c in cases)
 
