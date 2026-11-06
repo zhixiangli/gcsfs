@@ -415,3 +415,43 @@ def test_enrich_csv_leaves_hit_ratio_blank_without_data_or_for_other_buckets(tmp
     with open(csv_path, newline="") as f:
         rows = list(csv.DictReader(f))
     assert [r["rapid_cache_hit_ratio"] for r in rows] == ["1.0", ""]
+
+
+def _row(**overrides):
+    row = {
+        "benchmark_case_id": "case-a",
+        "gcs_bucket_name": "b1",
+        "measurement_window_start_unix_seconds": "1000",
+        "measurement_window_end_unix_seconds": "1060",
+        "dataset_size_bytes": "500",
+        "measurement_round_count": "1",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_enrich_csv_queries_through_scrape_time_to_include_late_samples(tmp_path):
+    """GCS stamps a case's samples up to minutes after the window; the per-case bucket
+    has no reads after the window, so the query runs from the window start to scrape time.
+    """
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_row()], _FIELDS)
+    client = _RecordingClient()
+
+    amplification.enrich_csv(str(csv_path), "proj", client=client, now=1500)
+
+    intervals = {
+        (r["interval"]["start_time"]["seconds"], r["interval"]["end_time"]["seconds"])
+        for r in client.requests
+    }
+    assert intervals == {(960, 1500)}
+
+
+def test_enrich_csv_never_queries_before_the_window_end(tmp_path):
+    csv_path = tmp_path / "results.csv"
+    _write_csv(csv_path, [_row()], _FIELDS)
+    client = _RecordingClient()
+
+    amplification.enrich_csv(str(csv_path), "proj", client=client, now=1010)
+
+    assert {r["interval"]["end_time"]["seconds"] for r in client.requests} == {1080}

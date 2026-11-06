@@ -1,7 +1,9 @@
 """Post-run GCS read-amplification scrape.
 
-Reads GCS server-side egress and request metrics per bucket epoch window from Cloud Monitoring.
-Buckets are strictly per-case to align with Cloud Monitoring's 60s bucket-level grid.
+Reads GCS server-side egress and request metrics for each per-case bucket from Cloud
+Monitoring. GCS stamps a case's 60s samples up to a few minutes after the reads finish, and
+nothing reads a case bucket after its measurement window, so each query runs from the
+window start (floored to the 60s grid) through scrape time.
 Best-effort: failures leave columns blank without raising to caller.
 """
 
@@ -119,7 +121,7 @@ def bucket_cache_hit_ratio(client, project, bucket, start_epoch, end_epoch, peri
     return hit / total if total > 0 else None
 
 
-def _fill_hit_ratio(row, project, client):
+def _fill_hit_ratio(row, project, client, query_end):
     """Best-effort: a missing ratio leaves the column blank and is not retried for."""
     try:
         ratio = bucket_cache_hit_ratio(
@@ -127,7 +129,7 @@ def _fill_hit_ratio(row, project, client):
             project,
             row["gcs_bucket_name"],
             int(float(row["measurement_window_start_unix_seconds"])),
-            int(float(row["measurement_window_end_unix_seconds"])),
+            max(int(float(row["measurement_window_end_unix_seconds"])), query_end),
         )
     except Exception as exc:
         logging.warning(
@@ -138,8 +140,13 @@ def _fill_hit_ratio(row, project, client):
         row[_HIT_RATIO] = str(ratio)
 
 
-def enrich_csv(csv_path, project, *, client):
-    """Add amplification columns and report complete/missing eligible rows."""
+def enrich_csv(csv_path, project, *, client, now=None):
+    """Add amplification columns and report complete/missing eligible rows.
+
+    `now` is the scrape time (default: current time); each bucket is queried from its
+    window start through max(window end, now).
+    """
+    query_end = int(time.time() if now is None else now)
     with open(csv_path, newline="") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -187,8 +194,9 @@ def enrich_csv(csv_path, project, *, client):
             )
             # Normalize GCS bytes sent by stored bytes times measured rounds.
             rounds = int(float(row.get("measurement_round_count") or 1))
-            egress = bucket_egress_bytes(client, project, bucket, ws, we)
-            reqs = bucket_read_requests(client, project, bucket, ws, we)
+            end = max(we, query_end)
+            egress = bucket_egress_bytes(client, project, bucket, ws, end)
+            reqs = bucket_read_requests(client, project, bucket, ws, end)
             if (
                 rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
                 and egress in (None, 0.0)
@@ -213,7 +221,7 @@ def enrich_csv(csv_path, project, *, client):
             and rapid_cache.is_rapid_cache_bucket_type(row.get("bucket_type"))
             and not _has_value(row.get(_HIT_RATIO))
         ):
-            _fill_hit_ratio(row, project, client)
+            _fill_hit_ratio(row, project, client, query_end)
 
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

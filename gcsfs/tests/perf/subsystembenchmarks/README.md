@@ -62,9 +62,11 @@ served (`ReadObject`/`BidiReadObject`) from each case bucket.
   `model_parallel_full`, every rank reads the whole checkpoint. The ratio does
   not account for this.
 
-The monitoring window covers the driver run: all rounds plus dataset build or
+The monitoring window starts with the driver run: all rounds plus dataset build or
 model setup. It excludes the corpus upload and the untimed setup checkpoint.
-It is widened to Cloud Monitoring's 60-second grid.
+The start is widened to Cloud Monitoring's 60-second grid. The query runs through
+scrape time, not the window end: GCS stamps samples up to a few minutes after the
+reads, and nothing reads a case bucket after its window.
 
 ## Configuration
 
