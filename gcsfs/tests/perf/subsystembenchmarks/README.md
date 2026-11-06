@@ -68,6 +68,14 @@ The start is widened to Cloud Monitoring's 60-second grid. The query runs throug
 scrape time, not the window end: GCS stamps samples up to a few minutes after the
 reads, and nothing reads a case bucket after its window.
 
+These columns are best-effort. Cloud Monitoring occasionally drops whole minutes
+of GCS samples for the whole project and never fills them in. Affected rows
+undercount bytes, request count, and amplification, or come back empty. A low
+amplification looks like an improvement. In Nov 4-6 nightly runs this affected
+about 2% of read rows for amplification and about 1% for request count only. The
+affected rows cluster in a few builds. Medians over many runs are robust, but
+single-run values and comparisons within one build can be skewed.
+
 ## Configuration
 
 Each group's `configs.yaml` defines:
