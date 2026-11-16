@@ -5,6 +5,7 @@ import ctypes
 import dataclasses
 import datetime
 import gc
+import glob
 import importlib
 import math
 import os
@@ -49,6 +50,7 @@ _DEFAULT_MASTER_PORTS: dict[tuple[int, str | None], int] = {}
 _AUTO_SET_ENV_PORTS: set[str] = set()
 _ATEXIT_REGISTERED = False
 _INITIAL_TPU_TOPOLOGY: str | None = os.environ.get("TORCH_TPU_TOPOLOGY")
+_TPU_PG_STORE_GLOB = "/dev/shm/torch_tpu_pg_store*"
 
 
 class PhaseError(RuntimeError, ProcessRaisedException):
@@ -490,6 +492,26 @@ def _apply_tpu_phase_env(spec: dict[str, Any], host: HostConfig) -> None:
         os.environ.pop("TPU_WORKER_HOSTNAMES", None)
 
 
+def _clean_tpu_node_local_store(host: HostConfig | None = None) -> None:
+    """Remove TorchTPU node-local FileStore files from /dev/shm between phases.
+
+    TorchTPU's ProcessGroupTpu keys its node-local FileStore by getppid()
+    (/dev/shm/torch_tpu_pg_store_<ppid>) and writes subgroup gather keys
+    (nlag:pg_sub:..., local_up:pg_sub:..., local_down:pg_sub:...) without
+    deleting them on destroy_process_group(). When multiple phases are spawned
+    by the same parent process (e.g. pytest on node 0 or worker.py on worker
+    nodes), stale subgroup keys from an earlier phase collide with subsequent
+    multi-dimensional DeviceMesh phases unless the FileStore files are removed.
+    """
+    if host is not None and host.device != "tpu":
+        return
+    for path in glob.glob(_TPU_PG_STORE_GLOB):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 
 def _set_pdeathsig(parent_pid: int) -> None:
     if sys.platform != "linux":
@@ -599,6 +621,7 @@ def _rank_entry(
 def spawn_local_ranks(
     job_id: int, spec: dict[str, Any], host: HostConfig
 ) -> Any | None:
+    _clean_tpu_node_local_store(host)
     ranks = local_ranks(int(spec["world_size"]), host)
     if len(ranks) == 0:
         return None
@@ -634,6 +657,7 @@ def _terminate_spawn_context(
             proc.join(timeout=1.0)
         except Exception:
             pass
+    _clean_tpu_node_local_store()
 
 
 class _HeartbeatMonitor:

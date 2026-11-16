@@ -462,3 +462,29 @@ def test_tpu_phase_spec_populates_per_phase_slice_env(monkeypatch):
     assert env_16_020["tpu_devices_per_host"] == "8"
 
 
+def test_clean_tpu_node_local_store(tmp_path, monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import phase
+
+    monkeypatch.setattr(
+        phase, "_TPU_PG_STORE_GLOB", str(tmp_path / "torch_tpu_pg_store*")
+    )
+    stale_a = tmp_path / "torch_tpu_pg_store_1234"
+    stale_b = tmp_path / "torch_tpu_pg_store_5678"
+    other = tmp_path / "other_file"
+    stale_a.write_text("stale_a")
+    stale_b.write_text("stale_b")
+    other.write_text("keep")
+
+    cpu_host = HostConfig(device="cpu")
+    phase._clean_tpu_node_local_store(cpu_host)
+    assert stale_a.exists()
+    assert stale_b.exists()
+
+    tpu_host = HostConfig(device="tpu")
+    phase._clean_tpu_node_local_store(tpu_host)
+    assert not stale_a.exists()
+    assert not stale_b.exists()
+    assert other.exists()
+
+
+
