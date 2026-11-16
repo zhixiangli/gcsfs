@@ -25,7 +25,8 @@ A group is a `<subsystem>/<implementation>` directory with its own
 Data-loading groups detect CUDA automatically. On a GPU host, each round
 includes copying batches to the GPU. The exceptions are WebDataset with
 `decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
-Checkpointing groups always run on CPU (`gloo`).
+Checkpointing groups default to CPU (`gloo`); `checkpointing/pytorch` also
+supports `--device=cuda` (`nccl`) and `--device=tpu` (`tpu_dist`).
 
 ### Wide-table projected reads (`dataloading/ray_data`)
 
