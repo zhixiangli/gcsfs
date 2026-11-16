@@ -46,9 +46,10 @@ def test_templates_render():
     for nnodes in (1, 2):
         a3_doc = _render_with_envsubst(
             A3ULTRA_TEMPLATE,
-            {**base_env, "NNODES": str(nnodes)},
+            {**base_env, "JOBSET_NAME": "dcp-a3ultra", "NNODES": str(nnodes)},
         )
         assert a3_doc["kind"] == "JobSet"
+        assert a3_doc["metadata"]["name"] == "dcp-a3ultra"
         rjob = a3_doc["spec"]["replicatedJobs"][0]
         job_spec = rjob["template"]["spec"]
         assert job_spec["parallelism"] == nnodes
@@ -67,6 +68,7 @@ def test_templates_render():
             TPU7X_TEMPLATE,
             {
                 **base_env,
+                "JOBSET_NAME": "dcp-tpu7x",
                 "NNODES": str(nnodes),
                 "TOPOLOGY": topology,
                 "PLACEMENT_POLICY": placement_policy,

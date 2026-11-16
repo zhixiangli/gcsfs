@@ -1,7 +1,7 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: dcp-a3ultra
+  name: ${JOBSET_NAME}
   namespace: default
   labels:
     kueue.x-k8s.io/priority-class: medium
@@ -52,7 +52,7 @@ spec:
                     - name: NNODES
                       value: "${NNODES}"
                     - name: MASTER_ADDR
-                      value: "dcp-a3ultra-worker-0-0.dcp-a3ultra"
+                      value: "${JOBSET_NAME}-worker-0-0.${JOBSET_NAME}"
                     - name: MASTER_PORT
                       value: "${MASTER_PORT}"
                     - name: CODE_URI
