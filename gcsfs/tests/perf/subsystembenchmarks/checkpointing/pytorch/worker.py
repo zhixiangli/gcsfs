@@ -97,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
                 if store.check([job_key]):
                     break
                 if store.check(["shutdown"]):
+                    stop_event.set()
+                    hb_thread.join(timeout=1.0)
                     try:
                         store.set(f"node/{host.node_rank}/shutdown_ack", "1")
                     except Exception:

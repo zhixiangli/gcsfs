@@ -39,6 +39,8 @@ _POLL_INTERVAL_S = 0.05
 _STORES: dict[tuple[int, str, int], dist.TCPStore] = {}
 # Maps (master_addr, master_port) -> PID of the process that created the master TCPStore.
 _STORE_OWNER_PID: dict[tuple[str, int], int] = {}
+# Maps (master_addr, master_port) -> nnodes recorded for the master TCPStore.
+_STORE_OWNER_NNODES: dict[tuple[str, int], int] = {}
 # Per-process default master port when GCSFS_SUBSYSTEM_MASTER_PORT is not set in os.environ.
 _DEFAULT_MASTER_PORTS: dict[tuple[int, str | None], int] = {}
 # Ports that ensure_leader_store populated into os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"].
@@ -132,7 +134,11 @@ def _owner_pid_for(master_addr: str, master_port: int) -> int | None:
 def _atexit_shutdown() -> None:
     pid = os.getpid()
     owned_hosts = [
-        HostConfig(master_addr=addr, master_port=port)
+        HostConfig(
+            nnodes=_STORE_OWNER_NNODES.get((addr, port), 1),
+            master_addr=addr,
+            master_port=port,
+        )
         for (addr, port), owner_pid in list(_STORE_OWNER_PID.items())
         if owner_pid == pid
     ]
@@ -180,17 +186,23 @@ def get_store(host: HostConfig | None = None) -> dist.TCPStore:
     resolved = _resolve_host(host)
     pid = os.getpid()
     key = (pid, resolved.master_addr, resolved.master_port)
+    addr_port = (resolved.master_addr, resolved.master_port)
     store = _STORES.get(key)
     if store is not None:
+        if _STORE_OWNER_PID.get(addr_port) == pid:
+            _STORE_OWNER_NNODES[addr_port] = max(
+                _STORE_OWNER_NNODES.get(addr_port, 1), resolved.nnodes
+            )
         return store
 
     timeout = datetime.timedelta(seconds=_pg_timeout_s())
-    addr_port = (resolved.master_addr, resolved.master_port)
     owner_pid = _owner_pid_for(resolved.master_addr, resolved.master_port)
 
-    # Connect as a client if another process (e.g. parent pytest process) owns the store.
-    if (owner_pid is not None and owner_pid != pid) or not _port_is_free(
-        resolved.master_port
+    # Connect as a client on workers or when another process (e.g. parent pytest process) owns the store.
+    if (
+        resolved.node_rank != 0
+        or (owner_pid is not None and owner_pid != pid)
+        or not _port_is_free(resolved.master_port)
     ):
         store = dist.TCPStore(
             host_name=resolved.master_addr,
@@ -211,6 +223,9 @@ def get_store(host: HostConfig | None = None) -> dist.TCPStore:
             timeout=timeout,
         )
         _STORE_OWNER_PID[addr_port] = pid
+        _STORE_OWNER_NNODES[addr_port] = max(
+            _STORE_OWNER_NNODES.get(addr_port, 1), resolved.nnodes
+        )
         os.environ["_GCSFS_STORE_OWNER"] = (
             f"{resolved.master_addr}:{resolved.master_port}:{pid}"
         )
@@ -235,16 +250,25 @@ def shutdown_store(host: HostConfig | None = None) -> None:
     pid = os.getpid()
     if host is not None:
         keys = [(pid, host.master_addr, host.master_port)]
-        nnodes = host.nnodes
+        base_nnodes = host.nnodes
     else:
         keys = [k for k in _STORES if k[0] == pid]
-        nnodes = int(os.environ.get("GCSFS_SUBSYSTEM_NNODES", "1"))
+        base_nnodes = int(os.environ.get("GCSFS_SUBSYSTEM_NNODES", "1"))
 
     for key in keys:
         _, addr, port = key
         addr_port = (addr, port)
         owner_pid = _owner_pid_for(addr, port)
+        recorded_nnodes = _STORE_OWNER_NNODES.pop(addr_port, 1)
+        nnodes = max(
+            base_nnodes,
+            recorded_nnodes,
+            int(os.environ.get("GCSFS_SUBSYSTEM_NNODES", "1")),
+        )
         store = _STORES.pop(key, None)
+        for def_key, def_port in list(_DEFAULT_MASTER_PORTS.items()):
+            if def_key[0] == pid and def_port == port:
+                _DEFAULT_MASTER_PORTS.pop(def_key, None)
         if store is None:
             continue
         if owner_pid is None or owner_pid == pid:
@@ -252,7 +276,7 @@ def shutdown_store(host: HostConfig | None = None) -> None:
                 store.set("shutdown", "1")
                 if nnodes > 1:
                     ack_keys = [f"node/{k}/shutdown_ack" for k in range(1, nnodes)]
-                    deadline = time.monotonic() + 0.5
+                    deadline = time.monotonic() + 2.0
                     while time.monotonic() < deadline:
                         if store.check(ack_keys):
                             break
@@ -533,6 +557,12 @@ def run_phase(
 ) -> PhaseHandle:
     fn_ref = _validate_fn_ref(fn_ref)
     resolved_host = _resolve_host(host)
+    max_ranks = resolved_host.nnodes * resolved_host.nproc_per_node
+    if world_size < 1 or world_size > max_ranks:
+        raise ValueError(
+            f"world_size={world_size} must be in [1, {max_ranks}] "
+            f"(nnodes={resolved_host.nnodes}, nproc_per_node={resolved_host.nproc_per_node})"
+        )
     store = get_store(resolved_host)
     port = _find_phase_port(resolved_host.master_port)
     job_id = store.add("job/next_id", 1) - 1

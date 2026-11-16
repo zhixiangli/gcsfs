@@ -313,6 +313,68 @@ def test_nested_fn_ref_rejected():
     with pytest.raises(ValueError, match="module-level function"):
         run_phase(f"{_THIS_MODULE}:Outer.inner", 1, "file:///tmp", None)
 
+    host = HostConfig(nnodes=2, nproc_per_node=4)
+    with pytest.raises(ValueError, match="world_size"):
+        run_phase(f"{_THIS_MODULE}:_rank_noop", 0, "file:///tmp", None, host=host)
+    with pytest.raises(ValueError, match="world_size"):
+        run_phase(f"{_THIS_MODULE}:_rank_noop", 9, "file:///tmp", None, host=host)
+
+
+def test_leader_atexit_cleanly_shuts_down_worker(tmp_path):
+    master_port = find_free_port()
+    base_env = os.environ.copy()
+    base_env.update(
+        {
+            "GCSFS_SUBSYSTEM_DEVICE": "cpu",
+            "GCSFS_SUBSYSTEM_NNODES": "2",
+            "GCSFS_SUBSYSTEM_MASTER_ADDR": "localhost",
+            "GCSFS_SUBSYSTEM_MASTER_PORT": str(master_port),
+            "GCSFS_SUBSYSTEM_NPROC_PER_NODE": "2",
+            "GCSFS_SUBSYSTEM_PG_TIMEOUT_S": "30",
+        }
+    )
+
+    leader_env = base_env.copy()
+    leader_env["GCSFS_SUBSYSTEM_NODE_RANK"] = "0"
+    leader_code = (
+        "from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.phase import run_phase\n"
+        f"handle = run_phase('{_THIS_MODULE}:_rank_noop', 4, {str(tmp_path)!r}, None)\n"
+        "handle.join()\n"
+        "# Exit without calling shutdown_store() explicitly; atexit must coordinate worker shutdown.\n"
+    )
+
+    worker_env = base_env.copy()
+    worker_env["GCSFS_SUBSYSTEM_NODE_RANK"] = "1"
+
+    leader_proc = subprocess.Popen(
+        [sys.executable, "-c", leader_code],
+        env=leader_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    worker_proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.worker",
+        ],
+        env=worker_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        leader_out, leader_err = leader_proc.communicate(timeout=30)
+        worker_out, worker_err = worker_proc.communicate(timeout=30)
+        assert leader_proc.returncode == 0, f"leader failed:\n{leader_err}"
+        assert worker_proc.returncode == 0, f"worker failed:\n{worker_err}"
+    finally:
+        for p in (leader_proc, worker_proc):
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=5)
+
 
 def test_durations_are_max_over_ranks():
     # Simulate ranks across two hosts with different perf_counter epochs:
