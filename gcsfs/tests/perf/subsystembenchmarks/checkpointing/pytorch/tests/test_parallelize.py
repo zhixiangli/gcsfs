@@ -4,6 +4,7 @@ import os
 import pytest
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -18,6 +19,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (
     build_mesh,
     parallelize,
+    shard_experts,
     split_stage,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
@@ -489,89 +491,83 @@ def test_split_stage_rejects_uneven_layers(tmp_path):
         split_stage(build_model(params), 0, 4)
 
 
-def _expert_index(fqn):
-    parts = fqn.split(".")
-    if "experts" in parts:
-        idx = parts.index("experts") + 1
-        if idx < len(parts) and parts[idx].isdigit():
-            return int(parts[idx])
-    return None
-
-
 def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
     params = _params(_create_tiny_olmoe_config_dir(tmp_path), "fsdp", dp=8)
     model = parallelize(build_model(params), build_mesh(params), params)
     names = [name for name, _ in model.named_parameters()]
     assert "model.layers.0.self_attn.q_norm.weight" in names
     assert "model.layers.0.mlp.gate.weight" in names
-    assert sum(1 for n in names if "experts.gate_up_proj" in n or "experts.down_proj" in n) == 2 * 2
+    assert (
+        sum(1 for n in names if "experts.gate_up_proj" in n or "experts.down_proj" in n)
+        == 2 * 2
+    )
     for name, p in model.named_parameters():
-        assert p.placements == (Shard(0),), name
+        expected_placement = (Shard(1),) if ".experts." in name else (Shard(0),)
+        assert p.placements == expected_placement, name
         assert p.device_mesh.mesh_dim_names == ("dp_shard",)
-    down = getattr(model, "model", model).layers[1].mlp.experts.down_proj
-    assert down.to_local().shape == (16 // 8, 64, 32)
+    experts = getattr(model, "model", model).layers[1].mlp.experts
+    assert experts.down_proj.placements == (Shard(1),)
+    assert experts.down_proj.to_local().shape == (16, 64 // 8, 32)
+    assert experts.gate_up_proj.placements == (Shard(1),)
+    assert experts.gate_up_proj.to_local().shape == (16, 64 // 8, 64)
 
 
-@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
-def test_ep_ranks_own_disjoint_experts(tmp_path):
-    params = _params(_create_tiny_olmoe_config_dir(tmp_path), "ep", dp=8, ep=8)
+def test_ep_shards_experts_on_expert_dim(tmp_path):
+    config_dir = _create_tiny_olmoe_config_dir(tmp_path, num_experts=16)
+    params = _params(config_dir, "ep", dp=4, ep=4, world_size=4)
     full = build_model(params)
-    full_experts = {
-        n for n, _ in full.named_parameters() if _expert_index(n) is not None
-    }
-    full_dense = {n for n, _ in full.named_parameters()} - full_experts
     param_bytes = {n: p.numel() * p.element_size() for n, p in full.named_parameters()}
-    expert_fqns = []
-    for rank in range(8):
-        dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=8)
+    expert_names = {n for n, _ in full.named_parameters() if ".experts." in n}
+    dense_names = {n for n, _ in full.named_parameters()} - expert_names
+    assert len(expert_names) == 2 * 2
+
+    for rank in range(4):
+        dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=4)
         try:
             mesh = build_mesh(params)
             # EP reuses the dp_shard ranks; it is not a mesh dim of its own.
             assert mesh.mesh_dim_names == ("dp_shard",)
+
+            raw_model = build_model(params)
+            sharded_set = shard_experts(raw_model, mesh["dp_shard"])
+            assert len(sharded_set) == len(expert_names)
+            assert sharded_set == {raw_model.get_parameter(n) for n in expert_names}
+
             model = parallelize(build_model(params), mesh, params)
+            fsdp_managed = {
+                fp.sharded_param
+                for mod in model.modules()
+                if isinstance(mod, FSDPModule)
+                for fp in fully_shard.state(mod)._fsdp_param_group.fsdp_params
+            }
+            for name, p in model.named_parameters():
+                assert isinstance(p, DTensor), name
+                assert p.placements == (Shard(0),), name
+                assert p.device_mesh.mesh_dim_names == ("dp_shard",), name
+                if name in expert_names:
+                    assert p.device_mesh == mesh["dp_shard"]
+                    assert p.to_local().shape[0] == 4
+                    assert p not in fsdp_managed, name
+                else:
+                    assert name in dense_names
+                    assert p in fsdp_managed, name
+
             materialize(model, seed=0)
             state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
         finally:
             dist.destroy_process_group()
 
-        local = {
-            fqn: t
-            for fqn, t in state["model"].items()
-            if _expert_index(fqn) is not None
-        }
-        assert set(state["model"]) - set(local) == full_dense
-        for fqn in full_dense:
-            t = state["model"][fqn]
-            assert t.placements == (Shard(0),), fqn
-            assert t.device_mesh.mesh_dim_names == ("dp_shard",)
-        for fqn, t in local.items():
-            assert not isinstance(t, DTensor), fqn
+        assert set(state["model"]) == expert_names | dense_names
+        for fqn in expert_names:
             assert model.get_parameter(fqn).requires_grad, fqn
-            assert not isinstance(state["optim"][f"state.{fqn}.exp_avg"], DTensor)
-        for layer in range(2):
-            owned = {
-                _expert_index(fqn)
-                for fqn in local
-                if fqn.startswith(f"model.layers.{layer}.")
-            }
-            assert owned == {2 * rank, 2 * rank + 1}
-        assert len(local) == 2 * 2 * 3
-        optim_fqns = {
-            key[len("state.") :].rsplit(".", 1)[0]
-            for key in state["optim"]
-            if key.startswith("state.")
-        }
-        assert optim_fqns == set(state["model"])
-        expected = sum(3 * param_bytes[f] // 8 + 8 for f in full_dense)
-        expected += sum(3 * param_bytes[f] + 8 for f in local)
+            exp_avg = state["optim"][f"state.{fqn}.exp_avg"]
+            assert isinstance(exp_avg, DTensor)
+            assert exp_avg.placements == (Shard(0),)
+            assert exp_avg.to_local().shape[0] == 4
+        expected = sum(3 * param_bytes[f] // 4 + 8 for f in param_bytes)
         assert expected_bytes_requested(state) == expected
-        expert_fqns.append(set(local))
-
-    assert sum(len(f) for f in expert_fqns) == len(set().union(*expert_fqns))
-    assert set().union(*expert_fqns) == full_experts
 
 
-@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
 def test_ep_rejects_uneven_experts(tmp_path, fake_pg):
     params = _params(
         _create_tiny_olmoe_config_dir(tmp_path, num_experts=12), "ep", dp=8, ep=8
