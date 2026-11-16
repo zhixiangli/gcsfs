@@ -432,3 +432,33 @@ def test_tpu_phase_spec_populates_per_phase_slice_env(monkeypatch):
     assert all(a.startswith("10.0.0.1:") for a in addrs_16[:8])
     assert all(a.startswith("10.0.0.2:") for a in addrs_16[8:])
 
+    # TorchTPU 0.2.0 path: get_device_properties() lacks .topology(); fallback to
+    # torch_tpu._internal.utils.hardware.get_tpu_topology(world_size).
+    class _FakeProps020:
+        name = "TPU v7"
+        total_memory = 96 * 1024**3
+
+    fake_tpu_020 = types.SimpleNamespace(get_device_properties=lambda: _FakeProps020())
+    monkeypatch.setattr(torch, "tpu", fake_tpu_020, raising=False)
+    fake_hw = types.ModuleType("torch_tpu._internal.utils.hardware")
+    fake_hw.get_tpu_topology = lambda ws=None: {2: "1,1,1,2", 4: "1,2,1,2", 8: "2,2,1,2"}[ws or 8]
+    fake_hw.get_devices_per_chip = lambda: 2
+    fake_utils = types.ModuleType("torch_tpu._internal.utils")
+    fake_utils.hardware = fake_hw
+    fake_internal = types.ModuleType("torch_tpu._internal")
+    fake_internal.utils = fake_utils
+    fake_root = types.ModuleType("torch_tpu")
+    fake_root._internal = fake_internal
+    monkeypatch.setitem(sys.modules, "torch_tpu", fake_root)
+    monkeypatch.setitem(sys.modules, "torch_tpu._internal", fake_internal)
+    monkeypatch.setitem(sys.modules, "torch_tpu._internal.utils", fake_utils)
+    monkeypatch.setitem(sys.modules, "torch_tpu._internal.utils.hardware", fake_hw)
+
+    env_4_020 = phase._build_tpu_phase_env(4, job_id=1, host=host_1n, store=None, phase_port=29600)
+    assert env_4_020["tpu_topology"] == "1,2,1,2"
+    assert env_4_020["tpu_devices_per_host"] == "4"
+    env_16_020 = phase._build_tpu_phase_env(16, job_id=2, host=host_2n, store=None, phase_port=29600)
+    assert env_16_020["tpu_topology"] == "2,2,2,2"
+    assert env_16_020["tpu_devices_per_host"] == "8"
+
+

@@ -347,6 +347,46 @@ def _pick_distinct_free_ports(count: int, exclude: set[int]) -> list[int]:
                 pass
 
 
+def _tpu_local_topology(world_size: int) -> tuple[int, ...] | None:
+    tpu_mod = getattr(torch, "tpu", None)
+    props = (
+        tpu_mod.get_device_properties()
+        if (tpu_mod is not None and hasattr(tpu_mod, "get_device_properties"))
+        else None
+    )
+    if props is not None and hasattr(props, "topology"):
+        return tuple(int(x) for x in props.topology(world_size))
+    try:
+        from torch_tpu._internal.utils import hardware
+
+        topo_str = hardware.get_tpu_topology(world_size)
+        if topo_str:
+            return tuple(int(p) for p in re.split(r"[,xX]", topo_str) if p)
+    except Exception:
+        pass
+    return None
+
+
+def _tpu_devices_per_chip() -> int:
+    tpu_mod = getattr(torch, "tpu", None)
+    props = (
+        tpu_mod.get_device_properties()
+        if (tpu_mod is not None and hasattr(tpu_mod, "get_device_properties"))
+        else None
+    )
+    if props is not None and hasattr(props, "devices_per_chip"):
+        return int(props.devices_per_chip)
+    try:
+        from torch_tpu._internal.utils import hardware
+
+        dpc = hardware.get_devices_per_chip()
+        if dpc is not None:
+            return int(dpc)
+    except Exception:
+        pass
+    return 2
+
+
 def _build_tpu_phase_env(
     world_size: int,
     job_id: int,
@@ -354,15 +394,10 @@ def _build_tpu_phase_env(
     store: dist.TCPStore | None,
     phase_port: int,
 ) -> dict[str, str]:
-    tpu_mod = getattr(torch, "tpu", None)
-    props = (
-        tpu_mod.get_device_properties()
-        if (tpu_mod is not None and hasattr(tpu_mod, "get_device_properties"))
-        else None
-    )
     if world_size <= host.nproc_per_node:
-        if props is not None:
-            topo = ",".join(map(str, props.topology(world_size)))
+        local_topo = _tpu_local_topology(world_size)
+        if local_topo is not None:
+            topo = ",".join(map(str, local_topo))
         else:
             topo = os.environ.get("TORCH_TPU_TOPOLOGY", "2,2,1,2")
         ports = _pick_distinct_free_ports(
@@ -376,7 +411,7 @@ def _build_tpu_phase_env(
         }
 
     num_hosts = (world_size + host.nproc_per_node - 1) // host.nproc_per_node
-    cores = getattr(props, "devices_per_chip", 2) if props is not None else 2
+    cores = _tpu_devices_per_chip()
     env_topo = (
         os.environ.get("TOPOLOGY")
         or _INITIAL_TPU_TOPOLOGY
@@ -393,13 +428,15 @@ def _build_tpu_phase_env(
         topo = ",".join(map(str, parts))
     elif len(parts) == 3 and math.prod(parts) * cores == world_size:
         topo = ",".join(map(str, [*parts, cores]))
-    elif props is not None:
-        host_topo = list(props.topology(host.nproc_per_node))
-        if len(host_topo) >= 3:
-            host_topo[2] *= num_hosts
-        topo = ",".join(map(str, host_topo))
     else:
-        topo = f"2,2,{num_hosts},{cores}"
+        local_topo = _tpu_local_topology(host.nproc_per_node)
+        if local_topo is not None:
+            host_topo = list(local_topo)
+            if len(host_topo) >= 3:
+                host_topo[2] *= num_hosts
+            topo = ",".join(map(str, host_topo))
+        else:
+            topo = f"2,2,{num_hosts},{cores}"
 
     env_hosts = [
         h.strip()

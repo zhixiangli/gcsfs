@@ -116,6 +116,9 @@ def test_entrypoint_branches():
         "RESULTS_URI": "gs://test-bucket/results/run-01",
         "NNODES": "2",
         "MASTER_ADDR": "dcp-a3ultra-worker-0-0.dcp-a3ultra",
+        "MASTER_PORT": "29500",
+        "CHECKPOINT_EXPORT_ROOT": "",
+        "CHECKPOINT_SOURCE_ROOT": "",
     }
 
     # Branch 1: Leader (JOB_COMPLETION_INDEX=0) on CUDA
