@@ -18,6 +18,10 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
     RecordingSavePlanner,
     build,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.handoff import (
+    export_checkpoint,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import HostConfig
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.phase import (
     RankContext,
     ensure_leader_store,
@@ -115,6 +119,9 @@ class PyTorchCheckpointWriteDriver(CheckpointDriver):
                 prefix,
                 params,
             ).join()
+            export_root = os.environ.get("GCSFS_SUBSYSTEM_CHECKPOINT_EXPORT_ROOT")
+            if export_root:
+                export_checkpoint(prefix, export_root, params, HostConfig.from_env())
 
         return CheckpointResult(
             durations=phase_durations(phase.results),

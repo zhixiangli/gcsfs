@@ -17,6 +17,9 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
     RecordingLoadPlanner,
     build,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.handoff import (
+    import_checkpoint,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.phase import (
     RankContext,
     ensure_leader_store,
@@ -94,6 +97,10 @@ class PyTorchCheckpointReadDriver(CheckpointDriver):
         ensure_leader_store()
 
     def setup(self, prefix, params):
+        source_root = os.environ.get("GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT")
+        if source_root:
+            import_checkpoint(source_root, prefix, params)
+            return
         run_phase(
             _SETUP_FN,
             params.source_layout().world_size,

@@ -1,4 +1,5 @@
 import dataclasses
+import os
 from collections.abc import Mapping
 from typing import Optional
 
@@ -7,6 +8,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     CheckpointParameters,
     _model_id_slug,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import HostConfig
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (
     STRATEGY_MESH_DIMS,
     Layout,
@@ -23,6 +25,7 @@ class PyTorchCheckpointParameters(CheckpointParameters):
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1
     source: Optional[dict] = None
+    source_device: Optional[str] = None
 
     def __post_init__(self):
         if (
@@ -39,8 +42,26 @@ class PyTorchCheckpointParameters(CheckpointParameters):
     def extra_columns(self):
         cols = super().extra_columns()
         src = self.source_layout()
+        host = HostConfig.from_env()
+        source_device = self.source_device
+        if source_device is None:
+            source_root = os.environ.get("GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT")
+            if source_root:
+                from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.handoff import (
+                    read_manifest,
+                )
+
+                manifest = read_manifest(source_root, self.source_key())
+                if manifest is not None:
+                    source_device = manifest.device
+        if source_device is None:
+            source_device = host.device
+
         cols.update(
             {
+                "device": host.device,
+                "nnodes": host.nnodes,
+                "source_device": source_device,
                 "data_parallel_replicate_size": self.data_parallel_replicate_size,
                 "pipeline_parallel_size": self.pipeline_parallel_size,
                 "expert_parallel_size": self.expert_parallel_size,
