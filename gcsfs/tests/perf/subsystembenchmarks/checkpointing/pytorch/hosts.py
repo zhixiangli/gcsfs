@@ -30,9 +30,7 @@ def _default_nproc_per_node(device: str) -> int:
     if device == "tpu":
         import torch_tpu  # noqa: F401
 
-        tpu_mod = getattr(torch, "tpu", None) or getattr(torch_tpu, "tpu", torch_tpu)
-        count = tpu_mod.device_count()
-        return count if count > 0 else 8
+        return torch.accelerator.device_count()
     raise ValueError(f"Unsupported device {device!r}; expected one of {tuple(BACKENDS)}")
 
 
@@ -44,6 +42,12 @@ class HostConfig:
     master_addr: str = "localhost"
     master_port: int = 29500
     nproc_per_node: int = 16
+
+    def __post_init__(self) -> None:
+        if self.device not in BACKENDS:
+            raise ValueError(
+                f"Unsupported device {self.device!r}; expected one of {tuple(BACKENDS)}"
+            )
 
     @classmethod
     def from_env(cls) -> HostConfig:
@@ -87,8 +91,6 @@ def init_rank(rank: int, world_size: int, host: HostConfig, port: int) -> torch.
     os.environ["LOCAL_RANK"] = str(local_rank)
     if host.master_addr in ("localhost", "127.0.0.1"):
         os.environ["GLOO_SOCKET_IFNAME"] = "lo"
-    else:
-        os.environ.pop("GLOO_SOCKET_IFNAME", None)
 
     if host.device == "cpu":
         device = torch.device("cpu")
@@ -96,15 +98,8 @@ def init_rank(rank: int, world_size: int, host: HostConfig, port: int) -> torch.
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
     else:
-        os.environ.setdefault("TPU_VISIBLE_CHIPS", str(local_rank))
-        os.environ.setdefault("CLOUD_TPU_TASK_ID", str(rank))
         import torch_tpu  # noqa: F401
 
-        if torch._C._get_privateuse1_backend_name() == "privateuseone":
-            torch.utils.rename_privateuse1_backend("tpu")
-        tpu_mod = getattr(torch, "tpu", None) or getattr(torch_tpu, "tpu", None)
-        if tpu_mod is not None and hasattr(tpu_mod, "set_device"):
-            tpu_mod.set_device("tpu")
         device = torch.device("tpu")
 
     timeout_s = int(

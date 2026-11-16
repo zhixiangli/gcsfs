@@ -9,7 +9,10 @@ import torch
 import torch.distributed as dist
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import configs
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import (
+    configs,
+    parallelize,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import (
     BACKENDS,
     DEFAULT_PG_TIMEOUT_S,
@@ -41,6 +44,11 @@ _HOST_ENV_KEYS = (
 def _clean_host_env(monkeypatch):
     for key in _HOST_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+
+
+def _ensure_tpu_privateuse1_registered() -> None:
+    if torch._C._get_privateuse1_backend_name() == "privateuseone":
+        torch.utils.rename_privateuse1_backend("tpu")
 
 
 def test_local_ranks_fill_hosts_in_order():
@@ -93,16 +101,27 @@ def test_from_env_defaults(monkeypatch):
     )
 
 
+def test_host_config_rejects_invalid_device(monkeypatch):
+    with pytest.raises(ValueError, match="Unsupported device"):
+        HostConfig(device="npu")
+
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "npu")
+    monkeypatch.setenv("GCSFS_SUBSYSTEM_NPROC_PER_NODE", "8")
+    with pytest.raises(ValueError, match="Unsupported device"):
+        HostConfig.from_env()
+
+
 def test_from_env_device_nproc_defaults(monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "cuda")
     with mock.patch.object(torch.cuda, "device_count", return_value=4):
         assert HostConfig.from_env().nproc_per_node == 4
 
     monkeypatch.setenv("GCSFS_SUBSYSTEM_DEVICE", "tpu")
-    fake_tpu_submod = types.SimpleNamespace(device_count=lambda: 8)
-    fake_torch_tpu = types.SimpleNamespace(tpu=fake_tpu_submod)
-    with mock.patch.dict(sys.modules, {"torch_tpu": fake_torch_tpu}):
-        monkeypatch.setattr(torch, "tpu", fake_tpu_submod, raising=False)
+    fake_torch_tpu = types.ModuleType("torch_tpu")
+    with (
+        mock.patch.dict(sys.modules, {"torch_tpu": fake_torch_tpu}),
+        mock.patch.object(torch.accelerator, "device_count", return_value=8),
+    ):
         assert HostConfig.from_env().nproc_per_node == 8
 
 
@@ -118,6 +137,20 @@ def test_build_mesh_uses_device_type():
         assert mesh.device_type == "cpu"
         assert mesh.mesh_dim_names == ("dp_shard",)
         assert tuple(mesh.shape) == (4,)
+
+        with mock.patch.object(
+            parallelize, "init_device_mesh", wraps=parallelize.init_device_mesh
+        ) as spy_init_mesh:
+            build_mesh(layout, device_type="cpu")
+            spy_init_mesh.assert_called_once_with(
+                "cpu", (4,), mesh_dim_names=("dp_shard",)
+            )
+
+        with mock.patch.object(parallelize, "init_device_mesh") as mock_init_mesh:
+            build_mesh(layout, device_type="tpu")
+            mock_init_mesh.assert_called_once_with(
+                "tpu", (4,), mesh_dim_names=("dp_shard",)
+            )
     finally:
         dist.destroy_process_group()
 
@@ -134,7 +167,6 @@ def test_materialize_uses_device():
         not p.is_meta and p.device == torch.device("cpu") and p.requires_grad
         for p in model.parameters()
     )
-
 
 
 def test_init_rank_sets_env_and_gloo_lo_only_for_localhost(monkeypatch):
@@ -171,6 +203,7 @@ def test_init_rank_sets_env_and_gloo_lo_only_for_localhost(monkeypatch):
             timeout=datetime.timedelta(seconds=DEFAULT_PG_TIMEOUT_S),
         )
 
+    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
     with mock.patch.object(dist, "init_process_group") as mock_init_pg:
         remote_host = HostConfig(
             device="cpu",
@@ -193,6 +226,12 @@ def test_init_rank_sets_env_and_gloo_lo_only_for_localhost(monkeypatch):
             world_size=16,
             timeout=datetime.timedelta(seconds=DEFAULT_PG_TIMEOUT_S),
         )
+
+    # Externally configured GLOO_SOCKET_IFNAME (e.g. multi-NIC GKE pod) is preserved on remote hosts.
+    monkeypatch.setenv("GLOO_SOCKET_IFNAME", "eth0")
+    with mock.patch.object(dist, "init_process_group"):
+        init_rank(rank=11, world_size=16, host=remote_host, port=29601)
+        assert os.environ["GLOO_SOCKET_IFNAME"] == "eth0"
 
 
 def test_init_rank_cuda_and_tpu_binding(monkeypatch):
@@ -218,19 +257,12 @@ def test_init_rank_cuda_and_tpu_binding(monkeypatch):
             timeout=datetime.timedelta(seconds=600),
         )
 
-    monkeypatch.delenv("TPU_VISIBLE_CHIPS", raising=False)
-    monkeypatch.delenv("CLOUD_TPU_TASK_ID", raising=False)
-    set_device_calls = []
-    fake_tpu_submod = types.SimpleNamespace(
-        device_count=lambda: 8,
-        set_device=lambda d: set_device_calls.append(d),
-    )
-    fake_torch_tpu = types.SimpleNamespace(tpu=fake_tpu_submod)
+    _ensure_tpu_privateuse1_registered()
+    fake_torch_tpu = types.ModuleType("torch_tpu")
     with (
         mock.patch.dict(sys.modules, {"torch_tpu": fake_torch_tpu}),
         mock.patch.object(dist, "init_process_group") as mock_init_pg,
     ):
-        monkeypatch.setattr(torch, "tpu", fake_tpu_submod, raising=False)
         tpu_host = HostConfig(
             device="tpu",
             nnodes=2,
@@ -239,11 +271,9 @@ def test_init_rank_cuda_and_tpu_binding(monkeypatch):
             nproc_per_node=4,
         )
         dev = init_rank(rank=6, world_size=8, host=tpu_host, port=29603)
-        assert dev.type == "tpu"
+        assert dev == torch.device("tpu")
+        assert os.environ["RANK"] == "6"
         assert os.environ["LOCAL_RANK"] == "2"
-        assert os.environ["TPU_VISIBLE_CHIPS"] == "2"
-        assert os.environ["CLOUD_TPU_TASK_ID"] == "6"
-        assert set_device_calls == ["tpu"]
         mock_init_pg.assert_called_once_with(
             "tpu_dist",
             rank=6,
