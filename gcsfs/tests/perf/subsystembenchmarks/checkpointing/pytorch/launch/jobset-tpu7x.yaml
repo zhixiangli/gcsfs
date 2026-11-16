@@ -1,0 +1,73 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: dcp-tpu7x
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: default
+    kueue.x-k8s.io/priority-class: medium
+spec:
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: slice-job
+      replicas: 1
+      template:
+        spec:
+          parallelism: ${NNODES}
+          completions: ${NNODES}
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                kueue.x-k8s.io/queue-name: default
+                kueue.x-k8s.io/priority-class: medium
+                declared-duration-minutes: "120"
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+                cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+                cloud.google.com/placement-policy-name: ${PLACEMENT_POLICY}
+              tolerations:
+                - key: "google.com/tpu"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+              restartPolicy: Never
+              containers:
+                - name: benchmark
+                  image: python:3.14
+                  command:
+                    - bash
+                    - -c
+                    - |
+                      gcloud storage cp "${CODE_URI}" /tmp/gcsfs-src.tar.gz &&
+                      mkdir -p /tmp/gcsfs-boot &&
+                      tar -xzf /tmp/gcsfs-src.tar.gz -C /tmp/gcsfs-boot &&
+                      exec bash /tmp/gcsfs-boot/gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/launch/entrypoint.sh
+                  env:
+                    - name: DEVICE
+                      value: "tpu"
+                    - name: NNODES
+                      value: "${NNODES}"
+                    - name: MASTER_ADDR
+                      value: "dcp-tpu7x-slice-job-0-0.dcp-tpu7x"
+                    - name: MASTER_PORT
+                      value: "29500"
+                    - name: CODE_URI
+                      value: "${CODE_URI}"
+                    - name: MODEL_ID
+                      value: "${MODEL_ID}"
+                    - name: GROUP_ARGS
+                      value: "${GROUP_ARGS}"
+                    - name: RESULTS_URI
+                      value: "${RESULTS_URI}"
+                    - name: CHECKPOINT_EXPORT_ROOT
+                      value: "${CHECKPOINT_EXPORT_ROOT}"
+                    - name: CHECKPOINT_SOURCE_ROOT
+                      value: "${CHECKPOINT_SOURCE_ROOT}"
+                  resources:
+                    requests:
+                      google.com/tpu: 4
+                    limits:
+                      google.com/tpu: 4

@@ -1,0 +1,69 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: dcp-a3ultra
+  namespace: default
+  labels:
+    kueue.x-k8s.io/priority-class: medium
+spec:
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: worker
+      replicas: 1
+      template:
+        spec:
+          parallelism: ${NNODES}
+          completions: ${NNODES}
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                kueue.x-k8s.io/priority-class: medium
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
+              containers:
+                - name: benchmark
+                  image: nvcr.io/nvidia/pytorch:25.03-py3
+                  command:
+                    - bash
+                    - -c
+                    - |
+                      gcloud storage cp "${CODE_URI}" /tmp/gcsfs-src.tar.gz &&
+                      mkdir -p /tmp/gcsfs-boot &&
+                      tar -xzf /tmp/gcsfs-src.tar.gz -C /tmp/gcsfs-boot &&
+                      exec bash /tmp/gcsfs-boot/gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/launch/entrypoint.sh
+                  env:
+                    - name: DEVICE
+                      value: "cuda"
+                    - name: NNODES
+                      value: "${NNODES}"
+                    - name: MASTER_ADDR
+                      value: "dcp-a3ultra-worker-0-0.dcp-a3ultra"
+                    - name: MASTER_PORT
+                      value: "29500"
+                    - name: CODE_URI
+                      value: "${CODE_URI}"
+                    - name: MODEL_ID
+                      value: "${MODEL_ID}"
+                    - name: GROUP_ARGS
+                      value: "${GROUP_ARGS}"
+                    - name: RESULTS_URI
+                      value: "${RESULTS_URI}"
+                    - name: CHECKPOINT_EXPORT_ROOT
+                      value: "${CHECKPOINT_EXPORT_ROOT}"
+                    - name: CHECKPOINT_SOURCE_ROOT
+                      value: "${CHECKPOINT_SOURCE_ROOT}"
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
+                  resources:
+                    requests:
+                      nvidia.com/gpu: 8
+                    limits:
+                      nvidia.com/gpu: 8
