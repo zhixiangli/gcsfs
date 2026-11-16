@@ -22,8 +22,18 @@ def test_token_matches_existing_ids():
     read_scenario = next(
         s for s in raw["scenarios"] if s["scenario"] == "checkpoint_read"
     )
-    rows = [baseline, *({**baseline, **v} for v in read_scenario["variants"])]
-    cases = PyTorchCheckpointConfigurator(configs.__file__).generate_cases()
+    read_variants = [
+        item
+        for v in read_scenario["variants"]
+        for item in (v if isinstance(v, list) else [v])
+        if "source" not in item
+    ]
+    rows = [baseline, *({**baseline, **v} for v in read_variants)]
+    cases = [
+        c
+        for c in PyTorchCheckpointConfigurator(configs.__file__).generate_cases()
+        if c.scenario == "checkpoint_read" and c.source is None
+    ]
 
     assert len(rows) == len(cases)
     for row, case in zip(rows, cases):
