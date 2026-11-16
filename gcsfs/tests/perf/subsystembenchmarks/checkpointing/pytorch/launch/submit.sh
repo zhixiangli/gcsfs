@@ -28,7 +28,7 @@ case "${TARGET}" in
     export TOPOLOGY=""
     export PLACEMENT_POLICY=""
     TEMPLATE="${SCRIPT_DIR}/jobset-a3ultra.yaml"
-    export JOBSET_NAME="dcp-a3ultra"
+    export JOBSET_NAME="${JOBSET_NAME:-dcp-a3ultra}"
     REPLICATED_JOB="worker"
     ;;
   tpu7x)
@@ -49,7 +49,7 @@ case "${TARGET}" in
         ;;
     esac
     TEMPLATE="${SCRIPT_DIR}/jobset-tpu7x.yaml"
-    export JOBSET_NAME="dcp-tpu7x"
+    export JOBSET_NAME="${JOBSET_NAME:-dcp-tpu7x}"
     REPLICATED_JOB="slice-job"
     ;;
   *)

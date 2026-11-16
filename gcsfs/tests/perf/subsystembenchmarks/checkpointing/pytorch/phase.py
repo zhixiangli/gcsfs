@@ -50,6 +50,9 @@ _DEFAULT_MASTER_PORTS: dict[tuple[int, str | None], int] = {}
 _AUTO_SET_ENV_PORTS: set[str] = set()
 _ATEXIT_REGISTERED = False
 _INITIAL_TPU_TOPOLOGY: str | None = os.environ.get("TORCH_TPU_TOPOLOGY")
+_INITIAL_TPU_WORKER_HOSTNAMES: str | None = os.environ.get(
+    "TPU_WORKER_HOSTNAMES"
+)
 _TPU_PG_STORE_GLOB = "/dev/shm/torch_tpu_pg_store*"
 
 
@@ -440,11 +443,12 @@ def _build_tpu_phase_env(
         else:
             topo = f"2,2,{num_hosts},{cores}"
 
-    env_hosts = [
-        h.strip()
-        for h in os.environ.get("TPU_WORKER_HOSTNAMES", "").split(",")
-        if h.strip()
-    ]
+    raw_hosts = (
+        os.environ.get("TPU_WORKER_HOSTNAMES")
+        or _INITIAL_TPU_WORKER_HOSTNAMES
+        or ""
+    )
+    env_hosts = [h.strip() for h in raw_hosts.split(",") if h.strip()]
     if len(env_hosts) >= num_hosts:
         host_addrs = env_hosts[:num_hosts]
     else:
@@ -472,6 +476,7 @@ def _build_tpu_phase_env(
         "tpu_topology": topo,
         "tpu_slicebuilder_addresses": addrs,
         "tpu_devices_per_host": str(host.nproc_per_node),
+        "tpu_worker_hostnames": ",".join(host_addrs),
     }
 
 
@@ -490,6 +495,8 @@ def _apply_tpu_phase_env(spec: dict[str, Any], host: HostConfig) -> None:
         )
     if int(spec["world_size"]) <= host.nproc_per_node:
         os.environ.pop("TPU_WORKER_HOSTNAMES", None)
+    elif spec.get("tpu_worker_hostnames"):
+        os.environ["TPU_WORKER_HOSTNAMES"] = str(spec["tpu_worker_hostnames"])
 
 
 def _clean_tpu_node_local_store(host: HostConfig | None = None) -> None:
