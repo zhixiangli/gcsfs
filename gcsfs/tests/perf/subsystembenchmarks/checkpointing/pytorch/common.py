@@ -49,26 +49,27 @@ class RecordingLoadPlanner(DefaultLoadPlanner):
         self.bytes_fetched: int = 0
 
     def _record(self, plan: LoadPlan) -> LoadPlan:
-        md = self.metadata.state_dict_metadata if self.metadata is not None else {}
-        storage = (
-            self.metadata.storage_data
-            if self.metadata is not None and self.metadata.storage_data is not None
-            else {}
-        )
         self.read_items = len(plan.items)
+        if self.metadata is None:
+            self.bytes_requested = 0
+            self.bytes_fetched = 0
+            return plan
+        md = self.metadata.state_dict_metadata
         self.bytes_requested = sum(
             math.prod(item.lengths) * md[item.dest_index.fqn].properties.dtype.itemsize
             for item in plan.items
-            if item.type == LoadItemType.TENSOR and item.dest_index.fqn in md
+            if item.type == LoadItemType.TENSOR
         )
-        storage_indices = {
-            item.storage_index
-            for item in plan.items
-            if item.type in (LoadItemType.TENSOR, LoadItemType.BYTE_IO)
-        }
-        self.bytes_fetched = sum(
-            storage[idx].length for idx in storage_indices if idx in storage
-        )
+        if self.metadata.storage_data is None:
+            self.bytes_fetched = 0
+        else:
+            storage = self.metadata.storage_data
+            storage_indices = {
+                item.storage_index
+                for item in plan.items
+                if item.type in (LoadItemType.TENSOR, LoadItemType.BYTE_IO)
+            }
+            self.bytes_fetched = sum(storage[idx].length for idx in storage_indices)
         return plan
 
     def create_local_plan(self) -> LoadPlan:

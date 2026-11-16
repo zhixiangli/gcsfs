@@ -111,16 +111,7 @@ class PyTorchCheckpointReadDriver(CheckpointDriver):
                     read_items.append(int(data["read_items"]))
                     bytes_fetched.append(int(data["bytes_fetched"]))
 
-        fs, fs_path = fsspec.core.url_to_fs(prefix)
-        all_files = fs.find(fs_path, detail=True)
-        physical_size = sum(
-            info["size"]
-            for path, info in all_files.items()
-            if self.is_checkpoint_file(path)
-        )
         total_fetched = sum(bytes_fetched)
-        amplification = total_fetched / physical_size if physical_size > 0 else 0.0
-
         return CheckpointResult(
             durations=ranks.durations,
             bytes_transferred=total_fetched,
@@ -128,7 +119,6 @@ class PyTorchCheckpointReadDriver(CheckpointDriver):
                 "dcp_read_items_per_rank_max": max(read_items),
                 "dcp_read_bytes_fetched_total": total_fetched,
                 "dcp_read_bytes_fetched_per_rank_max": max(bytes_fetched),
-                "dcp_read_amplification_planned": amplification,
             },
             verify=ranks.join,
         )

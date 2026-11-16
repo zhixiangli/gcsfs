@@ -176,6 +176,7 @@ def test_run_checkpoint_read_case(tmp_path, monkeypatch, read_count):
         bench.extra_info["checkpoint_read_throughput_mean_bytes_per_second"]
         == 500 * read_count
     )
+    assert "dcp_read_amplification_planned" not in bench.extra_info
 
 
 def test_checkpoint_case_prefix_generation(monkeypatch):

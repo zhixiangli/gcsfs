@@ -228,7 +228,6 @@ def test_driver_local_fs(tmp_path, sizes):
         "dcp_read_items_per_rank_max",
         "dcp_read_bytes_fetched_total",
         "dcp_read_bytes_fetched_per_rank_max",
-        "dcp_read_amplification_planned",
     }
 
     # One read item per local tensor (param, exp_avg, exp_avg_sq, step) plus
@@ -244,16 +243,11 @@ def test_driver_local_fs(tmp_path, sizes):
     )
 
     fs, root = fsspec.core.url_to_fs(prefix)
-    all_files = fs.find(root, detail=True)
-    files = list(all_files)
+    files = fs.find(root)
     ckpt_files = [f for f in files if driver.is_checkpoint_file(f)]
-    physical_size = sum(all_files[f]["size"] for f in ckpt_files)
     assert any(f.endswith(".metadata") for f in ckpt_files)
     assert sum(f.endswith(".distcp") for f in ckpt_files) == 4
     assert not any("checksums" in f for f in files)
-    assert cols["dcp_read_amplification_planned"] == pytest.approx(
-        cols["dcp_read_bytes_fetched_total"] / physical_size
-    )
 
     if sizes["strategy"] in ("fsdp", "hsdp"):
         metadata = FsspecReader(prefix).read_metadata()
