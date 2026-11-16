@@ -21,6 +21,16 @@ RESULTS_URI="${RESULTS_URI:-}"
 WORKDIR="${WORKDIR:-/tmp/gcsfs-src}"
 VENV_DIR="${VENV_DIR:-/tmp/gcsfs-venv}"
 
+# Bootstrap standalone gcloud CLI when missing on base images (nvcr.io/nvidia/pytorch, python:3.14).
+if [ "${DRY_RUN:-0}" != "1" ] && ! command -v gcloud >/dev/null 2>&1; then
+  mkdir -p /tmp/gcloud-install
+  curl -sSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz \
+    | tar -xz -C /tmp/gcloud-install
+  ln -sf /tmp/gcloud-install/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud
+  ln -sf /tmp/gcloud-install/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
+  export PATH="/tmp/gcloud-install/google-cloud-sdk/bin:${PATH}"
+fi
+
 # 1. Fetch and extract CODE_URI.
 if [ -n "${CODE_URI}" ]; then
   run_cmd "mkdir -p ${WORKDIR}"
@@ -38,7 +48,8 @@ fi
 run_cmd "python3 -m venv --system-site-packages ${VENV_DIR}"
 run_cmd ". ${VENV_DIR}/bin/activate"
 run_cmd "pip install -r ${REQ_FILE}"
-run_cmd "pip install -e ."
+export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
+run_cmd "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e ."
 
 # 3. Copy model config.json to /tmp/<name>/.
 IFS=',' read -ra _MODELS <<< "${MODEL_ID}"
@@ -79,7 +90,7 @@ if [ "${JOB_COMPLETION_INDEX}" = "0" ]; then
   if [ -n "${CHECKPOINT_SOURCE_ROOT:-}" ]; then
     EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS} --checkpoint-source-root=${CHECKPOINT_SOURCE_ROOT}"
   fi
-  run_cmd "python -m gcsfs.tests.perf.subsystembenchmarks.run --device=${DEVICE} --nnodes=${NNODES} --node-rank=0 --master-addr=${MASTER_ADDR} ${GROUP_ARGS} --results-uri=${RESULTS_URI}${EXTRA_RUN_ARGS}"
+  run_cmd "python -m gcsfs.tests.perf.subsystembenchmarks.run --device=${DEVICE} --nnodes=${NNODES} --node-rank=0 --master-addr=${MASTER_ADDR} --master-port=${MASTER_PORT} ${GROUP_ARGS} --results-uri=${RESULTS_URI}${EXTRA_RUN_ARGS}"
 else
   run_cmd "python -m gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.worker --device=${DEVICE} --nnodes=${NNODES} --node-rank=${JOB_COMPLETION_INDEX} --master-addr=${MASTER_ADDR} --master-port=${MASTER_PORT}"
 fi

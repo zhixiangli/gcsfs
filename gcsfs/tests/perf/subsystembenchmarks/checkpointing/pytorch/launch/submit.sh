@@ -28,7 +28,7 @@ case "${TARGET}" in
     export TOPOLOGY=""
     export PLACEMENT_POLICY=""
     TEMPLATE="${SCRIPT_DIR}/jobset-a3ultra.yaml"
-    JOBSET_NAME="dcp-a3ultra"
+    export JOBSET_NAME="dcp-a3ultra"
     REPLICATED_JOB="worker"
     ;;
   tpu7x)
@@ -49,7 +49,7 @@ case "${TARGET}" in
         ;;
     esac
     TEMPLATE="${SCRIPT_DIR}/jobset-tpu7x.yaml"
-    JOBSET_NAME="dcp-tpu7x"
+    export JOBSET_NAME="dcp-tpu7x"
     REPLICATED_JOB="slice-job"
     ;;
   *)
@@ -57,12 +57,28 @@ case "${TARGET}" in
     ;;
 esac
 
-RAW_GROUP_ARGS="$*"
-if [[ " ${RAW_GROUP_ARGS} " != *" --group="* ]] && [[ " ${RAW_GROUP_ARGS} " != *" --group "* ]]; then
-  export GROUP_ARGS="--group=checkpointing/pytorch ${RAW_GROUP_ARGS}"
-else
-  export GROUP_ARGS="${RAW_GROUP_ARGS}"
+# Quote per-argument boundaries in a YAML-safe single-quoted form when arguments
+# contain whitespace or shell metacharacters.
+HAS_GROUP_FLAG=0
+QUOTED_ARGS=()
+for arg in "$@"; do
+  case "${arg}" in
+    --group=*|--group)
+      HAS_GROUP_FLAG=1
+      ;;
+  esac
+  if [[ "${arg}" =~ ^[A-Za-z0-9_./:=,@+-]+$ ]]; then
+    QUOTED_ARGS+=("${arg}")
+  else
+    escaped_arg="${arg//\'/\'\\\'\'}"
+    QUOTED_ARGS+=("'${escaped_arg}'")
+  fi
+done
+
+if [ "${HAS_GROUP_FLAG}" -eq 0 ]; then
+  QUOTED_ARGS=("--group=checkpointing/pytorch" "${QUOTED_ARGS[@]}")
 fi
+export GROUP_ARGS="${QUOTED_ARGS[*]}"
 
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 BUCKET_PREFIX=""
@@ -77,6 +93,7 @@ for arg in "$@"; do
   esac
 done
 
+export MASTER_PORT="${MASTER_PORT:-29500}"
 export CODE_URI="${CODE_URI:-gs://${BUCKET_PREFIX:-gcsfs-bmk}-launch/code/gcsfs-${RUN_TS}.tar.gz}"
 export RESULTS_URI="${RESULTS_URI:-gs://${BUCKET_PREFIX:-gcsfs-bmk}-launch/results/${TARGET}-${RUN_TS}}"
 export MODEL_ID="${MODEL_ID:-gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B,gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924}"
@@ -85,17 +102,29 @@ export CHECKPOINT_SOURCE_ROOT="${CHECKPOINT_SOURCE_ROOT:-}"
 
 # 1. Tar the checkout and upload it to CODE_URI.
 TARBALL="/tmp/gcsfs-${RUN_TS}.tar.gz"
+TAR_EXCLUDES=(
+  "--exclude=.git"
+  "--exclude=.worktrees"
+  "--exclude=.venv"
+  "--exclude=venv"
+  "--exclude=.pytest_cache"
+  "--exclude=__pycache__"
+  "--exclude=.superpowers"
+  "--exclude=docs/superpowers"
+  "--exclude=gcsfs/tests/perf/subsystembenchmarks/__run__"
+)
 if [ "${DRY_RUN:-0}" = "1" ]; then
-  echo "tar --exclude='.git' --exclude='__pycache__' -czf ${TARBALL} -C ${REPO_ROOT} ."
+  echo "tar ${TAR_EXCLUDES[*]} -czf ${TARBALL} -C ${REPO_ROOT} ."
   echo "gcloud storage cp ${TARBALL} ${CODE_URI}"
 else
-  tar --exclude='.git' --exclude='__pycache__' -czf "${TARBALL}" -C "${REPO_ROOT}" .
+  tar "${TAR_EXCLUDES[@]}" -czf "${TARBALL}" -C "${REPO_ROOT}" .
   gcloud storage cp "${TARBALL}" "${CODE_URI}"
   rm -f "${TARBALL}"
 fi
 
-# 2. Render the template with envsubst (strip empty placement-policy-name for single-slice TPU).
-RENDERED="$(envsubst < "${TEMPLATE}" | sed '/placement-policy-name:[[:space:]]*$/d')"
+# 2. Render the template with envsubst using an explicit variable allowlist.
+ENVSUBST_VARS='${JOBSET_NAME} ${NNODES} ${TOPOLOGY} ${PLACEMENT_POLICY} ${CODE_URI} ${RESULTS_URI} ${MODEL_ID} ${GROUP_ARGS} ${MASTER_PORT} ${CHECKPOINT_EXPORT_ROOT} ${CHECKPOINT_SOURCE_ROOT}'
+RENDERED="$(envsubst "${ENVSUBST_VARS}" < "${TEMPLATE}" | sed '/placement-policy-name:[[:space:]]*$/d')"
 
 # 3. Apply the JobSet manifest.
 if [ "${DRY_RUN:-0}" = "1" ]; then

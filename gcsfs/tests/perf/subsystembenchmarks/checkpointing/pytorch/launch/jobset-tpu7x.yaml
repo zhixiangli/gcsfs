@@ -41,9 +41,17 @@ spec:
                     - bash
                     - -c
                     - |
-                      gcloud storage cp "${CODE_URI}" /tmp/gcsfs-src.tar.gz &&
-                      mkdir -p /tmp/gcsfs-boot &&
-                      tar -xzf /tmp/gcsfs-src.tar.gz -C /tmp/gcsfs-boot &&
+                      set -euo pipefail
+                      if ! command -v gcloud >/dev/null 2>&1; then
+                        mkdir -p /tmp/gcloud-install
+                        curl -sSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz \
+                          | tar -xz -C /tmp/gcloud-install
+                        ln -sf /tmp/gcloud-install/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud
+                        ln -sf /tmp/gcloud-install/google-cloud-sdk/bin/gsutil /usr/local/bin/gsutil
+                      fi
+                      gcloud storage cp "${CODE_URI}" /tmp/gcsfs-src.tar.gz
+                      mkdir -p /tmp/gcsfs-boot
+                      tar -xzf /tmp/gcsfs-src.tar.gz -C /tmp/gcsfs-boot
                       exec bash /tmp/gcsfs-boot/gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/launch/entrypoint.sh
                   env:
                     - name: DEVICE

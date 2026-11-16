@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -55,6 +56,8 @@ def test_templates_render():
         container = job_spec["template"]["spec"]["containers"][0]
         assert "nvidia" in container["image"].lower() and "pytorch" in container["image"].lower()
         assert container["resources"]["limits"]["nvidia.com/gpu"] == 8
+        cmd_str = " ".join(container["command"])
+        assert "google-cloud-cli" in cmd_str
 
     for topology, nnodes, placement_policy in (
         ("2x2x1", 1, ""),
@@ -97,6 +100,8 @@ def test_templates_render():
         container = pod_tmpl["spec"]["containers"][0]
         assert container["image"] == "python:3.14"
         assert container["resources"]["limits"]["google.com/tpu"] == 4
+        cmd_str = " ".join(container["command"])
+        assert "google-cloud-cli" in cmd_str
 
 
 def test_entrypoint_branches():
@@ -128,7 +133,7 @@ def test_entrypoint_branches():
     leader_out = leader_proc.stdout
     assert "gcloud storage cp gs://test-bucket/code/gcsfs.tar.gz" in leader_out
     assert "requirements-cuda.txt" in leader_out
-    assert "pip install -e ." in leader_out
+    assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e ." in leader_out
     assert (
         "gcloud storage cp -r gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B/config.json /tmp/Llama-3.1-8B/"
         in leader_out
@@ -138,6 +143,7 @@ def test_entrypoint_branches():
         "python -m gcsfs.tests.perf.subsystembenchmarks.run "
         "--device=cuda --nnodes=2 --node-rank=0 "
         "--master-addr=dcp-a3ultra-worker-0-0.dcp-a3ultra "
+        "--master-port=29500 "
         "--group=checkpointing/pytorch --project=test-proj --location=us-central1 --bucket-prefix=bmk "
         "--results-uri=gs://test-bucket/results/run-01"
     ) in leader_out
@@ -215,6 +221,8 @@ def test_submit_script_dry_run():
                 "--project=test-proj",
                 "--location=us-central1",
                 "--bucket-prefix=bmk",
+                "--sweep-axes=strategy model reshard",
+                "--filter=save or load",
             ],
             env={
                 **os.environ,
@@ -226,5 +234,51 @@ def test_submit_script_dry_run():
             text=True,
             check=True,
         )
-        assert "kubectl apply" in proc.stdout
-        assert "kubectl logs" in proc.stdout
+        out = proc.stdout
+        assert "--exclude=.worktrees" in out
+        assert "--exclude=.superpowers" in out
+        assert "--exclude=docs/superpowers" in out
+        assert "kubectl apply" in out
+        assert "kubectl logs" in out
+
+        # Extract rendered YAML between gcloud upload and kubectl apply
+        yaml_start = out.index("apiVersion: jobset.x-k8s.io/v1alpha2")
+        yaml_end = out.index("kubectl apply -f -")
+        rendered_doc = yaml.safe_load(out[yaml_start:yaml_end])
+        container_env = {
+            item["name"]: item["value"]
+            for item in rendered_doc["spec"]["replicatedJobs"][0]["template"]["spec"][
+                "template"
+            ]["spec"]["containers"][0]["env"]
+        }
+        group_args_val = container_env["GROUP_ARGS"]
+        assert "'--sweep-axes=strategy model reshard'" in group_args_val
+        assert "'--filter=save or load'" in group_args_val
+
+        # Verify entrypoint.sh preserves the multi-word arguments when passed GROUP_ARGS
+        ep_proc = subprocess.run(
+            ["bash", str(ENTRYPOINT)],
+            env={
+                **os.environ,
+                "DRY_RUN": "1",
+                "DEVICE": "cuda",
+                "NNODES": "2",
+                "JOB_COMPLETION_INDEX": "0",
+                "MASTER_ADDR": "dcp-a3ultra-worker-0-0.dcp-a3ultra",
+                "CODE_URI": "gs://test-bucket/code.tar.gz",
+                "MODEL_ID": "gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B",
+                "GROUP_ARGS": group_args_val,
+                "RESULTS_URI": "gs://test-bucket/results/run-01",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        run_line = [
+            line
+            for line in ep_proc.stdout.splitlines()
+            if "gcsfs.tests.perf.subsystembenchmarks.run" in line
+        ][0]
+        parsed_tokens = shlex.split(run_line)
+        assert "--sweep-axes=strategy model reshard" in parsed_tokens
+        assert "--filter=save or load" in parsed_tokens
