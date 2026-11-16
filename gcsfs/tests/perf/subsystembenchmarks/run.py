@@ -34,6 +34,36 @@ def _setup_environment(args):
     os.environ["GCSFS_SUBSYSTEM_SWEEP_AXES"] = args.sweep_axes
     if args.model_id:
         os.environ["GCSFS_SUBSYSTEM_MODEL_ID"] = args.model_id
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_MODEL_ID", None)
+    os.environ["GCSFS_SUBSYSTEM_DEVICE"] = args.device
+    os.environ["GCSFS_SUBSYSTEM_NNODES"] = str(args.nnodes)
+    os.environ["GCSFS_SUBSYSTEM_NODE_RANK"] = str(args.node_rank)
+    os.environ["GCSFS_SUBSYSTEM_MASTER_ADDR"] = args.master_addr
+    if args.master_port is not None:
+        os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"] = str(args.master_port)
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_MASTER_PORT", None)
+    if args.nproc_per_node is not None:
+        os.environ["GCSFS_SUBSYSTEM_NPROC_PER_NODE"] = str(args.nproc_per_node)
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_NPROC_PER_NODE", None)
+    if args.checkpoint_export_root:
+        os.environ["GCSFS_SUBSYSTEM_CHECKPOINT_EXPORT_ROOT"] = (
+            args.checkpoint_export_root
+        )
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_CHECKPOINT_EXPORT_ROOT", None)
+    if args.checkpoint_source_root:
+        os.environ["GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT"] = (
+            args.checkpoint_source_root
+        )
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT", None)
+    if args.results_uri:
+        os.environ["GCSFS_SUBSYSTEM_RESULTS_URI"] = args.results_uri
+    else:
+        os.environ.pop("GCSFS_SUBSYSTEM_RESULTS_URI", None)
     os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "true"
     os.environ["STORAGE_EMULATOR_HOST"] = "https://storage.googleapis.com"
     if rcu_state(args.bucket_type) == "z":
@@ -109,6 +139,56 @@ def _build_parser():
         help="directory for results.json/results.csv (default: __run__/<timestamp>); "
         "concurrent runs need distinct directories",
     )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda", "tpu"),
+        default="cpu",
+        help="compute device for the run",
+    )
+    parser.add_argument(
+        "--nnodes",
+        type=int,
+        default=1,
+        help="number of hosts in the run",
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=0,
+        help="rank of this host (0 is the leader; workers use the worker module)",
+    )
+    parser.add_argument(
+        "--master-addr",
+        default="localhost",
+        help="leader host address for multi-host rendezvous",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=None,
+        help="leader TCPStore port for multi-host rendezvous",
+    )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=None,
+        help="processes per host (defaults to per-device count)",
+    )
+    parser.add_argument(
+        "--checkpoint-export-root",
+        default="",
+        help="root URI to export saved checkpoints and manifests",
+    )
+    parser.add_argument(
+        "--checkpoint-source-root",
+        default="",
+        help="root URI to import source checkpoints from",
+    )
+    parser.add_argument(
+        "--results-uri",
+        default="",
+        help="URI to copy results_dir to after amplification scrape",
+    )
     return parser
 
 
@@ -122,6 +202,14 @@ def parse_args(argv=None):
         parser.error("--amplification-wait must be >= 0")
     if args.amplification_retry_wait < 0:
         parser.error("--amplification-retry-wait must be >= 0")
+    if args.node_rank != 0:
+        parser.error("--node-rank must be 0 for run.py; workers use the worker module")
+    if args.nnodes < 1:
+        parser.error("--nnodes must be >= 1")
+    if args.nproc_per_node is not None and args.nproc_per_node < 1:
+        parser.error("--nproc-per-node must be >= 1")
+    if args.master_port is not None and args.master_port < 1:
+        parser.error("--master-port must be >= 1")
     groups = discover_groups()
     if args.group not in groups:
         parser.error(f"unknown --group {args.group!r}; available: {', '.join(groups)}")
@@ -211,6 +299,19 @@ def _scrape_amplification(csv_path, args):
         return None
 
 
+def _copy_results(results_dir, results_uri):
+    if not results_uri:
+        return
+    import fsspec
+
+    fs, fs_path = fsspec.core.url_to_fs(results_uri)
+    fs.put(
+        os.path.join(results_dir, ""),
+        fs_path.rstrip("/") + "/",
+        recursive=True,
+    )
+
+
 def main(argv=None):
     args = parse_args(argv)
     _setup_environment(args)
@@ -228,6 +329,7 @@ def main(argv=None):
         logging.error("no benchmark results produced by group %s", args.group)
         raise SystemExit(rc or 1)
     _scrape_amplification(csv_path, args)
+    _copy_results(results_dir, args.results_uri)
     report.print_csv_to_shell(csv_path)
     logging.info("subsystembenchmarks run rc=%s csv=%s", rc, csv_path)
     raise SystemExit(rc)
