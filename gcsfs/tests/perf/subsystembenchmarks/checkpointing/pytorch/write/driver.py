@@ -20,6 +20,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.phase import (
     RankContext,
+    ensure_leader_store,
     phase_durations,
     run_phase,
 )
@@ -31,7 +32,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
 
 
 def _rank_save(ctx: RankContext, prefix: str, params) -> None:
-    torch.set_num_threads(max(1, (os.cpu_count() or 1) // ctx.world_size))
+    torch.set_num_threads(max(1, (os.cpu_count() or 1) // ctx.local_world_size))
     model, optim = build(
         params, params.target_layout(), SETUP_SEED, device=ctx.device
     )
@@ -63,7 +64,7 @@ def _rank_save(ctx: RankContext, prefix: str, params) -> None:
 
 
 def _rank_verify_saved(ctx: RankContext, prefix: str, params) -> None:
-    torch.set_num_threads(max(1, (os.cpu_count() or 1) // ctx.world_size))
+    torch.set_num_threads(max(1, (os.cpu_count() or 1) // ctx.local_world_size))
     model, optim = build(
         params, params.target_layout(), RUN_SEED, device=ctx.device
     )
@@ -91,6 +92,9 @@ _VERIFY_FN = f"{__name__}:_rank_verify_saved"
 
 
 class PyTorchCheckpointWriteDriver(CheckpointDriver):
+    def __init__(self) -> None:
+        ensure_leader_store()
+
     def setup(self, prefix, params):
         pass
 

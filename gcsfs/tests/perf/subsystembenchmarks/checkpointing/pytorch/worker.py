@@ -19,8 +19,8 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.phase import (
     spawn_local_ranks,
 )
 
-_HEARTBEAT_INTERVAL_S = 0.2
-_POLL_INTERVAL_S = 0.02
+_HEARTBEAT_INTERVAL_S = 1.0
+_POLL_INTERVAL_S = 0.05
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -108,15 +108,23 @@ def main(argv: list[str] | None = None) -> int:
             world_size = int(spec["world_size"])
             ranks = local_ranks(world_size, host)
             node_key = f"job/{job_id}/node/{host.node_rank}"
+            abort_key = f"job/{job_id}/abort"
 
             if len(ranks) == 0:
                 store.set(node_key, "ok")
             else:
                 context = spawn_local_ranks(job_id, spec, host)
+                aborted = False
                 try:
-                    while not context.join(timeout=0.05, grace_period=0.5):
-                        pass
-                    store.set(node_key, "ok")
+                    while not context.join(timeout=_POLL_INTERVAL_S, grace_period=0.5):
+                        if store.check([abort_key]) or store.check(["shutdown"]):
+                            _terminate_spawn_context(context)
+                            aborted = True
+                            break
+                    if aborted:
+                        store.set(node_key, f"node {host.node_rank} aborted")
+                    else:
+                        store.set(node_key, "ok")
                 except BaseException as exc:
                     _terminate_spawn_context(context)
                     err_idx = getattr(exc, "error_index", 0)

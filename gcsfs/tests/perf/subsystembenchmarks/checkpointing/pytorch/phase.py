@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import ctypes
 import dataclasses
 import datetime
@@ -31,13 +32,18 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import (
     local_ranks,
 )
 
-_HEARTBEAT_STALE_S = 2.0
-_POLL_INTERVAL_S = 0.02
+_HEARTBEAT_STALE_S = 10.0
+_POLL_INTERVAL_S = 0.05
 
 # Per-process cache of leader/client TCPStore objects keyed by (pid, master_addr, master_port).
 _STORES: dict[tuple[int, str, int], dist.TCPStore] = {}
+# Maps (master_addr, master_port) -> PID of the process that created the master TCPStore.
+_STORE_OWNER_PID: dict[tuple[str, int], int] = {}
 # Per-process default master port when GCSFS_SUBSYSTEM_MASTER_PORT is not set in os.environ.
 _DEFAULT_MASTER_PORTS: dict[tuple[int, str | None], int] = {}
+# Ports that ensure_leader_store populated into os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"].
+_AUTO_SET_ENV_PORTS: set[str] = set()
+_ATEXIT_REGISTERED = False
 
 
 class PhaseError(RuntimeError, ProcessRaisedException):
@@ -55,9 +61,14 @@ class RankContext:
     local_rank: int
     world_size: int
     device: torch.device
+    local_world_size: int = 1
     _store: dist.TCPStore | None = dataclasses.field(default=None, repr=False)
     _job_id: int = dataclasses.field(default=0, repr=False)
     _reported: bool = dataclasses.field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.local_world_size <= 0:
+            self.local_world_size = max(1, self.world_size)
 
     def report(self, result: dict[str, Any]) -> None:
         if self._reported:
@@ -103,6 +114,42 @@ def _pg_timeout_s() -> int:
     )
 
 
+def _owner_pid_for(master_addr: str, master_port: int) -> int | None:
+    addr_port = (master_addr, master_port)
+    if addr_port in _STORE_OWNER_PID:
+        return _STORE_OWNER_PID[addr_port]
+    env_owner = os.environ.get("_GCSFS_STORE_OWNER")
+    if env_owner:
+        try:
+            env_addr, env_port_s, env_pid_s = env_owner.rsplit(":", 2)
+            if env_addr == master_addr and int(env_port_s) == master_port:
+                return int(env_pid_s)
+        except ValueError:
+            pass
+    return None
+
+
+def _atexit_shutdown() -> None:
+    pid = os.getpid()
+    owned_hosts = [
+        HostConfig(master_addr=addr, master_port=port)
+        for (addr, port), owner_pid in list(_STORE_OWNER_PID.items())
+        if owner_pid == pid
+    ]
+    for h in owned_hosts:
+        try:
+            shutdown_store(h)
+        except Exception:
+            pass
+
+
+def _register_atexit() -> None:
+    global _ATEXIT_REGISTERED
+    if not _ATEXIT_REGISTERED:
+        atexit.register(_atexit_shutdown)
+        _ATEXIT_REGISTERED = True
+
+
 def _resolve_host(host: HostConfig | None) -> HostConfig:
     if host is not None:
         return host
@@ -117,14 +164,44 @@ def _resolve_host(host: HostConfig | None) -> HostConfig:
     return dataclasses.replace(HostConfig.from_env(), master_port=port)
 
 
+def ensure_leader_store(host: HostConfig | None = None) -> dist.TCPStore | None:
+    resolved = _resolve_host(host)
+    if resolved.node_rank != 0:
+        return None
+    if "GCSFS_SUBSYSTEM_MASTER_PORT" not in os.environ:
+        port_str = str(resolved.master_port)
+        os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"] = port_str
+        _AUTO_SET_ENV_PORTS.add(port_str)
+    store = get_store(resolved)
+    return store
+
+
 def get_store(host: HostConfig | None = None) -> dist.TCPStore:
     resolved = _resolve_host(host)
-    key = (os.getpid(), resolved.master_addr, resolved.master_port)
+    pid = os.getpid()
+    key = (pid, resolved.master_addr, resolved.master_port)
     store = _STORES.get(key)
     if store is not None:
         return store
 
     timeout = datetime.timedelta(seconds=_pg_timeout_s())
+    addr_port = (resolved.master_addr, resolved.master_port)
+    owner_pid = _owner_pid_for(resolved.master_addr, resolved.master_port)
+
+    # Connect as a client if another process (e.g. parent pytest process) owns the store.
+    if (owner_pid is not None and owner_pid != pid) or not _port_is_free(
+        resolved.master_port
+    ):
+        store = dist.TCPStore(
+            host_name=resolved.master_addr,
+            port=resolved.master_port,
+            is_master=False,
+            wait_for_workers=False,
+            timeout=timeout,
+        )
+        _STORES[key] = store
+        return store
+
     try:
         store = dist.TCPStore(
             host_name=resolved.master_addr,
@@ -133,8 +210,16 @@ def get_store(host: HostConfig | None = None) -> dist.TCPStore:
             wait_for_workers=False,
             timeout=timeout,
         )
+        _STORE_OWNER_PID[addr_port] = pid
+        os.environ["_GCSFS_STORE_OWNER"] = (
+            f"{resolved.master_addr}:{resolved.master_port}:{pid}"
+        )
+        if "GCSFS_SUBSYSTEM_MASTER_PORT" not in os.environ:
+            port_str = str(resolved.master_port)
+            os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"] = port_str
+            _AUTO_SET_ENV_PORTS.add(port_str)
+        _register_atexit()
     except Exception:
-        # Another process on node 0 (e.g. parent pytest process) already owns the master TCPStore.
         store = dist.TCPStore(
             host_name=resolved.master_addr,
             port=resolved.master_port,
@@ -156,20 +241,32 @@ def shutdown_store(host: HostConfig | None = None) -> None:
         nnodes = int(os.environ.get("GCSFS_SUBSYSTEM_NNODES", "1"))
 
     for key in keys:
+        _, addr, port = key
+        addr_port = (addr, port)
+        owner_pid = _owner_pid_for(addr, port)
         store = _STORES.pop(key, None)
         if store is None:
             continue
-        try:
-            store.set("shutdown", "1")
-            if nnodes > 1:
-                ack_keys = [f"node/{k}/shutdown_ack" for k in range(1, nnodes)]
-                deadline = time.monotonic() + 0.5
-                while time.monotonic() < deadline:
-                    if store.check(ack_keys):
-                        break
-                    time.sleep(_POLL_INTERVAL_S)
-        except Exception:
-            pass
+        if owner_pid is None or owner_pid == pid:
+            try:
+                store.set("shutdown", "1")
+                if nnodes > 1:
+                    ack_keys = [f"node/{k}/shutdown_ack" for k in range(1, nnodes)]
+                    deadline = time.monotonic() + 0.5
+                    while time.monotonic() < deadline:
+                        if store.check(ack_keys):
+                            break
+                        time.sleep(_POLL_INTERVAL_S)
+            except Exception:
+                pass
+            _STORE_OWNER_PID.pop(addr_port, None)
+            if os.environ.get("_GCSFS_STORE_OWNER") == f"{addr}:{port}:{pid}":
+                os.environ.pop("_GCSFS_STORE_OWNER", None)
+            port_str = str(port)
+            if port_str in _AUTO_SET_ENV_PORTS:
+                _AUTO_SET_ENV_PORTS.discard(port_str)
+                if os.environ.get("GCSFS_SUBSYSTEM_MASTER_PORT") == port_str:
+                    os.environ.pop("GCSFS_SUBSYSTEM_MASTER_PORT", None)
         del store
 
     if host is None:
@@ -215,8 +312,29 @@ def _set_pdeathsig(parent_pid: int) -> None:
         pass
 
 
+def _validate_fn_ref(fn_ref: str | Callable[..., None]) -> str:
+    if callable(fn_ref):
+        qualname = getattr(fn_ref, "__qualname__", "")
+        if not qualname or "." in qualname or "<" in qualname:
+            raise ValueError(
+                f"fn_ref must be a module-level function, got {fn_ref!r}"
+            )
+        fn_ref = f"{fn_ref.__module__}:{qualname}"
+    if ":" not in fn_ref:
+        raise ValueError(
+            f"fn_ref must be 'module:function', got {fn_ref!r}"
+        )
+    _, func_name = fn_ref.split(":", 1)
+    if not func_name or "." in func_name or "<" in func_name:
+        raise ValueError(
+            f"fn_ref must reference a module-level function, got {fn_ref!r}"
+        )
+    return fn_ref
+
+
 def _resolve_fn(fn_ref: str) -> Callable[..., None]:
-    module_name, func_name = fn_ref.split(":", 1)
+    validated = _validate_fn_ref(fn_ref)
+    module_name, func_name = validated.split(":", 1)
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError:
@@ -230,6 +348,7 @@ def _resolve_fn(fn_ref: str) -> Callable[..., None]:
 def _rank_entry(
     local_idx: int,
     ranks_start: int,
+    local_world_size: int,
     job_id: int,
     spec: dict[str, Any],
     host: HostConfig,
@@ -255,6 +374,7 @@ def _rank_entry(
             local_rank=local_rank,
             world_size=world_size,
             device=device,
+            local_world_size=local_world_size,
             _store=store,
             _job_id=job_id,
         )
@@ -288,13 +408,22 @@ def spawn_local_ranks(
         return None
     return mp.spawn(
         _rank_entry,
-        args=(ranks.start, job_id, spec, host, os.getpid()),
+        args=(ranks.start, len(ranks), job_id, spec, host, os.getpid()),
         nprocs=len(ranks),
         join=False,
     )
 
 
-def _terminate_spawn_context(context: Any | None) -> None:
+def _terminate_spawn_context(
+    context: Any | None,
+    store: dist.TCPStore | None = None,
+    job_id: int | None = None,
+) -> None:
+    if store is not None and job_id is not None:
+        try:
+            store.set(f"job/{job_id}/abort", "1")
+        except Exception:
+            pass
     if context is None:
         return
     for proc in getattr(context, "processes", []):
@@ -402,13 +531,11 @@ def run_phase(
     host: HostConfig | None = None,
     **kwargs: Any,
 ) -> PhaseHandle:
+    fn_ref = _validate_fn_ref(fn_ref)
     resolved_host = _resolve_host(host)
     store = get_store(resolved_host)
     port = _find_phase_port(resolved_host.master_port)
     job_id = store.add("job/next_id", 1) - 1
-
-    if callable(fn_ref):
-        fn_ref = f"{fn_ref.__module__}:{fn_ref.__qualname__}"
 
     spec = {
         "fn_ref": fn_ref,
@@ -517,7 +644,7 @@ def run_phase(
 
             time.sleep(_POLL_INTERVAL_S)
     except BaseException:
-        _terminate_spawn_context(context)
+        _terminate_spawn_context(context, store=store, job_id=job_id)
         raise
 
     results = [
@@ -528,9 +655,8 @@ def run_phase(
     def _join() -> None:
         nonlocal local_joined
         join_deadline = time.monotonic() + timeout_s
-        worker_node_keys = [
-            f"job/{job_id}/node/{k}" for k in range(1, resolved_host.nnodes)
-        ]
+        worker_ranks = range(1, resolved_host.nnodes)
+        verified_ok_workers: set[int] = set()
         try:
             while True:
                 if not local_joined:
@@ -556,7 +682,9 @@ def run_phase(
                             error_pid=getattr(exc, "pid", 0),
                         ) from exc
 
-                for k in range(1, resolved_host.nnodes):
+                for k in worker_ranks:
+                    if k in verified_ok_workers:
+                        continue
                     node_key = f"job/{job_id}/node/{k}"
                     if store.check([node_key]):
                         status = store.get(node_key).decode(
@@ -572,10 +700,9 @@ def run_phase(
                                     extra_reason=f"node {k} failed:\n{status}",
                                 )
                             )
+                        verified_ok_workers.add(k)
 
-                if local_joined and (
-                    not worker_node_keys or store.check(worker_node_keys)
-                ):
+                if local_joined and len(verified_ok_workers) == len(worker_ranks):
                     return
 
                 dead_msg = hb_monitor.check_dead_worker(job_id)
@@ -606,7 +733,7 @@ def run_phase(
                 if local_joined:
                     time.sleep(_POLL_INTERVAL_S)
         except BaseException:
-            _terminate_spawn_context(context)
+            _terminate_spawn_context(context, store=store, job_id=job_id)
             raise
 
     return PhaseHandle(results=results, _join_fn=_join)

@@ -1,5 +1,6 @@
 import contextlib
 import dataclasses
+import multiprocessing as mp
 import os
 import pickle
 import subprocess
@@ -36,7 +37,6 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.write.driver imp
     PyTorchCheckpointWriteDriver,
 )
 
-
 _THIS_MODULE = (
     "gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.tests.test_phase"
 )
@@ -53,8 +53,18 @@ def _rank_report_then_wait(ctx: RankContext, prefix: str, params) -> None:
     dist.barrier()
 
 
+def _rank_fail_after_report_on_node1(
+    ctx: RankContext, prefix: str, params
+) -> None:
+    ctx.report({"durations": [(0.0, 1.0)]})
+    if ctx.rank == 5:
+        raise RuntimeError("post-report verification failed")
+
+
 @contextlib.contextmanager
-def _two_host_cluster(monkeypatch, pg_timeout_s: int = 30):
+def _two_host_cluster(
+    monkeypatch, pg_timeout_s: int = 30, precreate_store: bool = True
+):
     master_port = find_free_port()
     env_vars = {
         "GCSFS_SUBSYSTEM_DEVICE": "cpu",
@@ -69,8 +79,7 @@ def _two_host_cluster(monkeypatch, pg_timeout_s: int = 30):
         monkeypatch.setenv(k, v)
 
     leader_host = HostConfig.from_env()
-    # Ensure the leader TCPStore is listening before launching the worker.
-    store = get_store(leader_host)
+    store = get_store(leader_host) if precreate_store else None
 
     worker_env = os.environ.copy()
     worker_env["GCSFS_SUBSYSTEM_NODE_RANK"] = "1"
@@ -104,9 +113,9 @@ def test_two_host_fsdp8_load(tmp_path, monkeypatch):
     config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
     params = _params(config_dir, strategy="fsdp", dp=8, world_size=8, rounds=2)
     prefix = (tmp_path / "ckpt").as_uri()
-    driver = PyTorchCheckpointReadDriver()
 
     with _two_host_cluster(monkeypatch) as (host, store, worker_proc):
+        driver = PyTorchCheckpointReadDriver()
         driver.setup(prefix, params)
         result = driver.run(prefix, params)
         result.verify()
@@ -128,6 +137,38 @@ def test_two_host_fsdp8_load(tmp_path, monkeypatch):
     assert worker_proc.returncode == 0
 
 
+def test_two_host_spawned_setup_subprocess(tmp_path, monkeypatch):
+    config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
+    params = _params(config_dir, strategy="fsdp", dp=8, world_size=8, rounds=1)
+    prefix = (tmp_path / "ckpt").as_uri()
+
+    with _two_host_cluster(monkeypatch, precreate_store=False) as (
+        host,
+        _,
+        worker_proc,
+    ):
+        # Instantiating the driver in the parent must create & own the leader TCPStore
+        # while remaining picklable for mp.get_context("spawn").Process(target=driver.setup).
+        driver = PyTorchCheckpointReadDriver()
+
+        ctx = mp.get_context("spawn")
+        p = ctx.Process(target=driver.setup, args=(prefix, params))
+        p.start()
+        p.join()
+        assert p.exitcode == 0
+
+        # Parent's master TCPStore must still be alive for driver.run (job/1) on both hosts.
+        result = driver.run(prefix, params)
+        result.verify()
+
+        store = get_store(host)
+        assert store.get("job/0/node/1").decode() == "ok"
+        assert store.get("job/1/node/1").decode() == "ok"
+        assert len(result.durations) == 1
+
+    assert worker_proc.returncode == 0
+
+
 def test_two_host_reshard_fsdp8_to_fsdp4(tmp_path, monkeypatch):
     config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
     params = _params(config_dir, strategy="fsdp", dp=4, world_size=4, rounds=1)
@@ -137,9 +178,9 @@ def test_two_host_reshard_fsdp8_to_fsdp4(tmp_path, monkeypatch):
         "world_size": 8,
     }
     prefix = (tmp_path / "ckpt").as_uri()
-    driver = PyTorchCheckpointReadDriver()
 
     with _two_host_cluster(monkeypatch) as (host, store, worker_proc):
+        driver = PyTorchCheckpointReadDriver()
         worker_host = dataclasses.replace(host, node_rank=1)
         assert len(local_ranks(4, worker_host)) == 0
 
@@ -164,9 +205,9 @@ def test_two_host_save(tmp_path, monkeypatch):
         scenario="checkpoint_write",
     )
     prefix = (tmp_path / "ckpt").as_uri()
-    driver = PyTorchCheckpointWriteDriver()
 
     with _two_host_cluster(monkeypatch) as (host, store, worker_proc):
+        driver = PyTorchCheckpointWriteDriver()
         driver.setup(prefix, params)
         result = driver.run(prefix, params)
         result.verify()
@@ -182,6 +223,27 @@ def test_two_host_save(tmp_path, monkeypatch):
         assert sum(f.endswith(".distcp") for f in files) == 8
 
     assert worker_proc.returncode == 0
+
+
+def test_worker_post_report_rank_failure_raises_in_join(tmp_path, monkeypatch):
+    with _two_host_cluster(monkeypatch, pg_timeout_s=30) as (
+        host,
+        store,
+        worker_proc,
+    ):
+        handle = run_phase(
+            f"{_THIS_MODULE}:_rank_fail_after_report_on_node1",
+            8,
+            str(tmp_path),
+            None,
+            host=host,
+        )
+        assert len(handle.results) == 8
+        with pytest.raises(
+            RuntimeError,
+            match=r"(?s)node 1.*rank 5.*post-report verification failed",
+        ):
+            handle.join()
 
 
 def test_worker_death_fails_case(tmp_path, monkeypatch):
@@ -239,6 +301,17 @@ def test_phase_port_differs_from_store_port(monkeypatch):
         assert spec["port"] != host.master_port
     finally:
         shutdown_store(host)
+
+
+def test_nested_fn_ref_rejected():
+    def _nested(ctx, prefix, params):
+        pass
+
+    with pytest.raises(ValueError, match="module-level function"):
+        run_phase(_nested, 1, "file:///tmp", None)
+
+    with pytest.raises(ValueError, match="module-level function"):
+        run_phase(f"{_THIS_MODULE}:Outer.inner", 1, "file:///tmp", None)
 
 
 def test_durations_are_max_over_ranks():
