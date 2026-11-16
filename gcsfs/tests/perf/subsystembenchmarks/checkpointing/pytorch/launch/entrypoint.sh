@@ -46,13 +46,15 @@ else
   REQ_FILE="gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/requirements-${DEVICE}.txt"
 fi
 if [ "${DRY_RUN:-0}" = "1" ]; then
-  run_cmd "python3 -m venv --system-site-packages ${VENV_DIR}"
+  run_cmd "python3 -m venv ${VENV_DIR}"
 else
-  python3 -m venv --system-site-packages "${VENV_DIR}" || python3 -m venv --system-site-packages --without-pip "${VENV_DIR}"
+  if ! python3 -m venv "${VENV_DIR}" 2>/dev/null; then
+    python3 -m venv --without-pip "${VENV_DIR}"
+    pip --python "${VENV_DIR}/bin/python" install pip
+  fi
 fi
 run_cmd ". ${VENV_DIR}/bin/activate"
 unset PIP_CONSTRAINT
-export PIP_BREAK_SYSTEM_PACKAGES=1
 run_cmd "pip install -r ${REQ_FILE}"
 export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
 run_cmd "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e ."
