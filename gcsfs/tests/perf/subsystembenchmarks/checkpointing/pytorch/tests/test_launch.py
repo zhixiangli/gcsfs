@@ -100,6 +100,14 @@ def test_templates_render():
         container = pod_tmpl["spec"]["containers"][0]
         assert container["image"] == "python:3.14"
         assert container["resources"]["limits"]["google.com/tpu"] == 4
+        assert any(
+            v["name"] == "dshm" and v.get("emptyDir", {}).get("medium") == "Memory"
+            for v in pod_tmpl["spec"]["volumes"]
+        )
+        assert any(
+            vm["name"] == "dshm" and vm["mountPath"] == "/dev/shm"
+            for vm in container["volumeMounts"]
+        )
         cmd_str = " ".join(container["command"])
         assert "google-cloud-cli" in cmd_str
 

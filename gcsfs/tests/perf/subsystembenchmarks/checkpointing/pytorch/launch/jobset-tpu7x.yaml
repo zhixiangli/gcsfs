@@ -23,7 +23,7 @@ spec:
               labels:
                 kueue.x-k8s.io/queue-name: default
                 kueue.x-k8s.io/priority-class: medium
-                declared-duration-minutes: "120"
+                declared-duration-minutes: "360"
             spec:
               nodeSelector:
                 cloud.google.com/gke-tpu-accelerator: tpu7x
@@ -34,6 +34,10 @@ spec:
                   operator: "Exists"
                   effect: "NoSchedule"
               restartPolicy: Never
+              volumes:
+                - name: dshm
+                  emptyDir:
+                    medium: Memory
               containers:
                 - name: benchmark
                   image: python:3.14
@@ -76,6 +80,9 @@ spec:
                       value: "${CHECKPOINT_EXPORT_ROOT}"
                     - name: CHECKPOINT_SOURCE_ROOT
                       value: "${CHECKPOINT_SOURCE_ROOT}"
+                  volumeMounts:
+                    - name: dshm
+                      mountPath: /dev/shm
                   resources:
                     requests:
                       google.com/tpu: 4
