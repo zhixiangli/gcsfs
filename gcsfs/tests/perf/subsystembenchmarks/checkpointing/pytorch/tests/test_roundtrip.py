@@ -1,9 +1,28 @@
 import fsspec
 import pytest
+import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader, FsspecWriter
-from torch.distributed.checkpoint.metadata import TensorStorageMetadata
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+from torch.distributed.checkpoint.filesystem import _StorageInfo
+from torch.distributed.checkpoint.metadata import (
+    BytesStorageMetadata,
+    ChunkStorageMetadata,
+    Metadata,
+    MetadataIndex,
+    TensorProperties,
+    TensorStorageMetadata,
+)
+from torch.distributed.checkpoint.planner import (
+    LoadItemType,
+    LoadPlan,
+    ReadItem,
+    SavePlan,
+    TensorWriteData,
+    WriteItem,
+    WriteItemType,
+)
 from torch.distributed.checkpoint.state_dict import set_state_dict
 from torch.multiprocessing.spawn import ProcessRaisedException
 
@@ -13,13 +32,14 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     run_split,
     setup_distributed_env,
 )
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import build_model
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parallelize import (
-    build_mesh,
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
+    RecordingLoadPlanner,
+    RecordingSavePlanner,
+    build,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import build_model
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.read.driver import (
     PyTorchCheckpointReadDriver,
-    _build,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     STATE_DICT_OPTIONS,
@@ -45,13 +65,13 @@ _STRATEGIES_4RANK = [
 def _roundtrip_rank(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
-        mesh = build_mesh(params.target_layout())
-        model, optim = _build(params, mesh, _SEED_A)
+        layout = params.target_layout()
+        model, optim = build(params, layout, _SEED_A)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
         saved = state_checksum(state)
 
-        model, optim = _build(params, mesh, _SEED_B)
+        model, optim = build(params, layout, _SEED_B)
         state = get_fqn_state_dict(model, optim)
         assert state_checksum(state) != saved
         dcp.load(state, storage_reader=FsspecReader(prefix))
@@ -122,7 +142,7 @@ def test_roundtrip_ep(tmp_path):
 def _checksum_rank(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
-        model, optim = _build(params, build_mesh(params.target_layout()), _SEED_A)
+        model, optim = build(params, params.target_layout(), _SEED_A)
         q.put((rank, state_checksum(get_fqn_state_dict(model, optim))))
     finally:
         dist.destroy_process_group()
@@ -204,22 +224,52 @@ def test_driver_local_fs(tmp_path, sizes):
     cols = result.extra_columns
     assert len(result.durations) == 2
     assert all(d > 0 for d in result.durations)
-    assert cols.keys() == {"dcp_read_items_per_rank_max"}
+    assert cols.keys() == {
+        "dcp_read_items_per_rank_max",
+        "dcp_read_bytes_fetched_total",
+        "dcp_read_bytes_fetched_per_rank_max",
+        "dcp_read_amplification_planned",
+    }
 
     # One read item per local tensor (param, exp_avg, exp_avg_sq, step) plus
     # one per BYTE_IO param_groups entry.
     n_local_tensors = 4 * len(list(build_model(params).parameters()))
     n_items = n_local_tensors + _n_bytes_entries(prefix)
     assert cols["dcp_read_items_per_rank_max"] == n_items
-    assert driver.read_count(params) == sizes.get("dpr", 1)
+    assert result.bytes_transferred == cols["dcp_read_bytes_fetched_total"]
+    assert (
+        0
+        < cols["dcp_read_bytes_fetched_per_rank_max"]
+        <= cols["dcp_read_bytes_fetched_total"]
+    )
 
     fs, root = fsspec.core.url_to_fs(prefix)
-    files = fs.find(root)
+    all_files = fs.find(root, detail=True)
+    files = list(all_files)
     ckpt_files = [f for f in files if driver.is_checkpoint_file(f)]
+    physical_size = sum(all_files[f]["size"] for f in ckpt_files)
     assert any(f.endswith(".metadata") for f in ckpt_files)
     assert sum(f.endswith(".distcp") for f in ckpt_files) == 4
-    assert sum("checksums" in f for f in files) == 4
-    assert not any("checksums" in f for f in ckpt_files)
+    assert not any("checksums" in f for f in files)
+    assert cols["dcp_read_amplification_planned"] == pytest.approx(
+        cols["dcp_read_bytes_fetched_total"] / physical_size
+    )
+
+    if sizes["strategy"] in ("fsdp", "hsdp"):
+        metadata = FsspecReader(prefix).read_metadata()
+        sharded_distcp_bytes = 0
+        replicated_distcp_bytes = 0
+        for idx, info in metadata.storage_data.items():
+            item_md = metadata.state_dict_metadata[idx.fqn]
+            if isinstance(item_md, TensorStorageMetadata) and len(item_md.chunks) > 1:
+                sharded_distcp_bytes += info.length
+            else:
+                replicated_distcp_bytes += info.length
+        dpr = sizes.get("dpr", 1)
+        assert (
+            cols["dcp_read_bytes_fetched_total"]
+            == sharded_distcp_bytes * dpr + replicated_distcp_bytes * params.world_size
+        )
 
 
 def test_driver_local_fs_pp(tmp_path):
@@ -240,7 +290,9 @@ def test_driver_local_fs_pp(tmp_path):
     n_bytes_per_param = _n_bytes_entries(prefix) // len(list(model.parameters()))
     n_items = (4 + n_bytes_per_param) * n_last_stage_params
     assert result.extra_columns["dcp_read_items_per_rank_max"] == n_items
-    assert driver.read_count(params) == 1
+    assert (
+        result.bytes_transferred == result.extra_columns["dcp_read_bytes_fetched_total"]
+    )
 
 
 def test_checksum_mismatch_raises(tmp_path):
@@ -250,6 +302,7 @@ def test_checksum_mismatch_raises(tmp_path):
     prefix = (tmp_path / "ckpt").as_uri()
     driver = PyTorchCheckpointReadDriver()
     driver.setup(prefix, params)
+    assert not list((tmp_path / "ckpt").rglob("*checksum*"))
 
     # The largest saved item is mostly raw tensor bytes, so its middle is payload.
     storage = FsspecReader(prefix).read_metadata().storage_data
@@ -260,11 +313,111 @@ def test_checksum_mismatch_raises(tmp_path):
     data[mid : mid + 16] = bytes(b ^ 0xFF for b in data[mid : mid + 16])
     path.write_bytes(bytes(data))
 
-    # run() returns the timings; the checksum check runs in verify(), which
+    # run() returns the timings; the value check runs in verify(), which
     # the harness calls after the monitored window.
     result = driver.run(prefix, params)
-    with pytest.raises(ProcessRaisedException, match="checksum mismatch"):
+    with pytest.raises(ProcessRaisedException, match="value mismatch"):
         result.verify()
+
+
+def test_bytes_fetched_counts_storage_item_once(monkeypatch):
+    shared_idx = MetadataIndex("w", [0, 0])
+    byte_idx = MetadataIndex("pg")
+    plan = LoadPlan(
+        [
+            ReadItem(
+                type=LoadItemType.TENSOR,
+                dest_index=MetadataIndex("w", [0, 0]),
+                dest_offsets=torch.Size([0, 0]),
+                storage_index=shared_idx,
+                storage_offsets=torch.Size([0, 0]),
+                lengths=torch.Size([2, 4]),
+            ),
+            ReadItem(
+                type=LoadItemType.TENSOR,
+                dest_index=MetadataIndex("w", [2, 0]),
+                dest_offsets=torch.Size([2, 0]),
+                storage_index=shared_idx,
+                storage_offsets=torch.Size([2, 0]),
+                lengths=torch.Size([2, 4]),
+            ),
+            ReadItem(
+                type=LoadItemType.BYTE_IO,
+                dest_index=byte_idx,
+                dest_offsets=torch.Size([]),
+                storage_index=byte_idx,
+                storage_offsets=torch.Size([]),
+                lengths=torch.Size([]),
+            ),
+        ]
+    )
+    metadata = Metadata(
+        state_dict_metadata={
+            "w": TensorStorageMetadata(
+                properties=TensorProperties(dtype=torch.bfloat16),
+                size=torch.Size([4, 4]),
+                chunks=[
+                    ChunkStorageMetadata(
+                        offsets=torch.Size([0, 0]), sizes=torch.Size([4, 4])
+                    )
+                ],
+            ),
+            "pg": BytesStorageMetadata(),
+        },
+        storage_data={
+            shared_idx: _StorageInfo(
+                relative_path="__0_0.distcp", offset=0, length=1000
+            ),
+            byte_idx: _StorageInfo(
+                relative_path="__0_0.distcp", offset=1000, length=64
+            ),
+        },
+    )
+
+    monkeypatch.setattr(DefaultLoadPlanner, "create_local_plan", lambda self: plan)
+    planner = RecordingLoadPlanner()
+    planner.metadata = metadata
+    planner.create_local_plan()
+
+    assert planner.read_items == 3
+    assert planner.bytes_requested == (2 * 4 + 2 * 4) * 2
+    assert planner.bytes_fetched == 1000 + 64
+
+
+def test_recording_save_planner_sums_tensor_chunks_only():
+    plan = SavePlan(
+        [
+            WriteItem(
+                index=MetadataIndex("w0", [0, 0]),
+                type=WriteItemType.TENSOR,
+                tensor_data=TensorWriteData(
+                    chunk=ChunkStorageMetadata(
+                        offsets=torch.Size([0, 0]), sizes=torch.Size([3, 5])
+                    ),
+                    properties=TensorProperties(dtype=torch.bfloat16),
+                    size=torch.Size([6, 5]),
+                ),
+            ),
+            WriteItem(
+                index=MetadataIndex("w1", [2, 0]),
+                type=WriteItemType.SHARD,
+                tensor_data=TensorWriteData(
+                    chunk=ChunkStorageMetadata(
+                        offsets=torch.Size([2, 0]), sizes=torch.Size([2, 4])
+                    ),
+                    properties=TensorProperties(dtype=torch.float32),
+                    size=torch.Size([4, 4]),
+                ),
+            ),
+            WriteItem(
+                index=MetadataIndex("pg"),
+                type=WriteItemType.BYTE_IO,
+            ),
+        ]
+    )
+    planner = RecordingSavePlanner()
+    planner.finish_plan(plan)
+    assert planner.bytes_written == 3 * 5 * 2 + 2 * 4 * 4
 
 
 def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):

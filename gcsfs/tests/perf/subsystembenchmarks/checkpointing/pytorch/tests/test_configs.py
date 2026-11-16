@@ -191,7 +191,12 @@ def test_columns_in_schema():
         for col in c.extra_columns():
             assert col in schema_fields, f"param column {col} missing from schema"
 
-    # Columns emitted by PyTorchCheckpointReadDriver.run result
-    driver_cols = ["dcp_read_items_per_rank_max"]
+    # Columns emitted by PyTorchCheckpointReadDriver.run / run_checkpoint_case
+    driver_cols = [
+        "dcp_read_items_per_rank_max",
+        "dcp_read_bytes_fetched_total",
+        "dcp_read_bytes_fetched_per_rank_max",
+        "dcp_read_amplification_planned",
+    ]
     for col in driver_cols:
         assert col in schema_fields, f"driver column {col} missing from schema"
