@@ -1,8 +1,9 @@
 import contextlib
+import dataclasses
 
 import fsspec
 import pytest
-from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
+from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 
 pytest.importorskip("transformers")
@@ -76,6 +77,8 @@ _RESHARD_PAIRS = [
         dict(strategy="fsdp", dp=4, world_size=4),
         id="fsdp_tp-to-fsdp",
     ),
+    # Scaled down from the 8->16 hsdp_tp grow in configs.yaml: at 4 ranks
+    # hsdp_tp (3 non-unit dims >= 8 ranks) is represented by fsdp_tp (dp=2, tp=2).
     pytest.param(
         "llama",
         dict(
@@ -152,8 +155,7 @@ def test_reshard_roundtrip(tmp_path, model_kind, source, target):
     else:
         config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=8)
 
-    params = _params(config_dir, **target)
-    params.source = dict(source)
+    params = dataclasses.replace(_params(config_dir, **target), source=dict(source))
     params.source_layout().validate()
     params.target_layout().validate()
     assert params.source_layout() != params.target_layout()
@@ -193,12 +195,14 @@ def test_reshard_tp_to_fsdp_amplification(tmp_path, monkeypatch):
     world_size = 4
 
     config_dir = _create_tiny_llama_config_dir(tmp_path, num_layers=num_layers)
-    params = _params(config_dir, strategy="fsdp", dp=world_size, world_size=world_size)
-    params.source = {
-        "strategy": "tp",
-        "tensor_parallel_size": world_size,
-        "world_size": world_size,
-    }
+    params = dataclasses.replace(
+        _params(config_dir, strategy="fsdp", dp=world_size, world_size=world_size),
+        source={
+            "strategy": "tp",
+            "tensor_parallel_size": world_size,
+            "world_size": world_size,
+        },
+    )
 
     ckpt_dir = tmp_path / "ckpt"
     local_prefix = ckpt_dir.as_uri()

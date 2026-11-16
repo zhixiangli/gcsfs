@@ -109,8 +109,8 @@ def _copy_file(
         try:
             src_fs.copy(src_file, dst_file)
             return
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Server-side copy failed for %s -> %s: %s", src_file, dst_file, exc)
     parent = posixpath.dirname(dst_file)
     if parent:
         dst_fs.makedirs(parent, exist_ok=True)
@@ -154,6 +154,8 @@ def export_checkpoint(
     ckpt_files = [
         f for f in src_fs.find(src_root) if f.endswith(_CHECKPOINT_SUFFIXES)
     ]
+    if not ckpt_files:
+        raise ValueError(f"No checkpoint files found to export under {prefix!r}")
     for src_file in ckpt_files:
         rel = posixpath.relpath(src_file, src_root)
         dst_file = f"{dst_root.rstrip('/')}/{rel}"
@@ -249,6 +251,8 @@ def import_checkpoint(root: str, prefix: str, params) -> Manifest:
     ckpt_files = [
         f for f in src_fs.find(src_root) if f.endswith(_CHECKPOINT_SUFFIXES)
     ]
+    if not ckpt_files:
+        raise ValueError(f"No checkpoint files found under {src_uri!r} for key {key!r}")
     for src_file in ckpt_files:
         rel = posixpath.relpath(src_file, src_root)
         dst_file = f"{dst_root.rstrip('/')}/{rel}"

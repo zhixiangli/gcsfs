@@ -1,4 +1,6 @@
+import dataclasses
 import os
+from collections.abc import Mapping
 from typing import Optional
 
 import pytest
@@ -7,6 +9,7 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     OneFactorCheckpointConfigurator,
 )
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import HostConfig
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import Layout
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
     PyTorchCheckpointParameters,
 )
@@ -57,5 +60,17 @@ class PyTorchCheckpointConfigurator(OneFactorCheckpointConfigurator):
 
     def validate_case(self, p):
         super().validate_case(p)
+        if p.source is not None:
+            if not isinstance(p.source, Mapping):
+                raise ValueError(
+                    f"source layout must be a mapping, got {type(p.source).__name__}"
+                )
+            allowed = {f.name for f in dataclasses.fields(Layout)}
+            unknown = sorted(set(p.source) - allowed)
+            if unknown:
+                raise ValueError(f"Unknown keys in source layout: {unknown}")
+            missing = sorted({"strategy", "world_size"} - set(p.source))
+            if missing:
+                raise ValueError(f"Missing required keys in source layout: {missing}")
         p.target_layout().validate()
         p.source_layout().validate()

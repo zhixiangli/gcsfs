@@ -118,19 +118,7 @@ def test_node_rank_nonzero_rejected(capsys, node_rank):
 
 
 def test_results_uri_copies_results(monkeypatch, tmp_path):
-    for key in (
-        "GCSFS_SUBSYSTEM_BUCKET_PREFIX",
-        "GCSFS_SUBSYSTEM_BUCKET_TYPE",
-        "GCSFS_SUBSYSTEM_PROJECT",
-        "GCSFS_SUBSYSTEM_LOCATION",
-        "GCSFS_SUBSYSTEM_ZONE",
-        "GCSFS_SUBSYSTEM_SWEEP_AXES",
-        "GCSFS_SUBSYSTEM_MODEL_ID",
-        "GCSFS_SUBSYSTEM_GROUP",
-        "GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT",
-        "STORAGE_EMULATOR_HOST",
-        *_NEW_ENV_KEYS,
-    ):
+    for key in _ALL_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
 
     results_dir = tmp_path / "local_results"

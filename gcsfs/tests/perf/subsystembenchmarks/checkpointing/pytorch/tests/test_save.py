@@ -2,7 +2,7 @@ import dataclasses
 
 import fsspec
 import pytest
-from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
+from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.multiprocessing.spawn import ProcessRaisedException
 

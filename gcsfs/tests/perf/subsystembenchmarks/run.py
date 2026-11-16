@@ -25,7 +25,7 @@ def discover_groups():
 
 
 def _setup_environment(args):
-    """Export the per-case bucket configuration consumed by dataloading."""
+    """Export per-case bucket, device, multi-host, checkpoint handoff, and results URI settings."""
     os.environ["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = args.bucket_prefix
     os.environ["GCSFS_SUBSYSTEM_BUCKET_TYPE"] = args.bucket_type
     os.environ["GCSFS_SUBSYSTEM_PROJECT"] = args.project

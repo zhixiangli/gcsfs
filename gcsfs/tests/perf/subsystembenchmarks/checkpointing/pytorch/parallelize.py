@@ -39,7 +39,8 @@ def split_stage(model: nn.Module, stage: int, num_stages: int) -> None:
         inner.embed_tokens = None
     if stage != num_stages - 1:
         inner.norm = None
-        model.lm_head = None
+        if hasattr(model, "lm_head"):
+            model.lm_head = None
 
 
 def shard_experts(model: nn.Module, mesh: DeviceMesh) -> set[nn.Parameter]:

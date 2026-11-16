@@ -54,7 +54,7 @@ spec:
                     - name: MASTER_ADDR
                       value: "dcp-a3ultra-worker-0-0.dcp-a3ultra"
                     - name: MASTER_PORT
-                      value: "29500"
+                      value: "${MASTER_PORT}"
                     - name: CODE_URI
                       value: "${CODE_URI}"
                     - name: MODEL_ID

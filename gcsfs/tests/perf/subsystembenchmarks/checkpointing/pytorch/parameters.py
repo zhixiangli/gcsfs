@@ -44,7 +44,7 @@ class PyTorchCheckpointParameters(CheckpointParameters):
         src = self.source_layout()
         host = HostConfig.from_env()
         source_device = self.source_device
-        if source_device is None:
+        if source_device is None and "read" in self.scenario:
             source_root = os.environ.get("GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT")
             if source_root:
                 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.handoff import (

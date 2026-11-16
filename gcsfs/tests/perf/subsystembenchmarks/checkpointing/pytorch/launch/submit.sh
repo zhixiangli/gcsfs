@@ -70,7 +70,8 @@ for arg in "$@"; do
   if [[ "${arg}" =~ ^[A-Za-z0-9_./:=,@+-]+$ ]]; then
     QUOTED_ARGS+=("${arg}")
   else
-    escaped_arg="${arg//\'/\'\\\'\'}"
+    bs='\'
+    escaped_arg="${arg//\'/\'${bs}\'\'}"
     QUOTED_ARGS+=("'${escaped_arg}'")
   fi
 done
