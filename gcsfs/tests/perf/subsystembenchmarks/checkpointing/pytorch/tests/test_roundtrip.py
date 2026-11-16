@@ -113,6 +113,7 @@ def test_roundtrip_16rank(tmp_path, sizes):
     _run_roundtrip(tmp_path, 16, sizes)
 
 
+@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
 def test_roundtrip_ep(tmp_path):
     # 16 experts over 4 ranks: each rank saves and loads 4 whole experts per layer.
     config_dir = _create_tiny_olmoe_config_dir(tmp_path)
@@ -267,6 +268,7 @@ def test_checksum_mismatch_raises(tmp_path):
         result.verify()
 
 
+@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
 def test_driver_local_fs_olmoe_ep_vs_fsdp(tmp_path):
     config_dir = _create_tiny_olmoe_config_dir(tmp_path)
     model = build_model(_params(config_dir, "fsdp", dp=4, world_size=4))

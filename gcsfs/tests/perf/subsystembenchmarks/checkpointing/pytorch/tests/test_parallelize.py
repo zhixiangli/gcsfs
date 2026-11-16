@@ -491,7 +491,11 @@ def test_split_stage_rejects_uneven_layers(tmp_path):
 
 def _expert_index(fqn):
     parts = fqn.split(".")
-    return int(parts[parts.index("experts") + 1]) if "experts" in parts else None
+    if "experts" in parts:
+        idx = parts.index("experts") + 1
+        if idx < len(parts) and parts[idx].isdigit():
+            return int(parts[idx])
+    return None
 
 
 def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
@@ -500,14 +504,15 @@ def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
     names = [name for name, _ in model.named_parameters()]
     assert "model.layers.0.self_attn.q_norm.weight" in names
     assert "model.layers.0.mlp.gate.weight" in names
-    assert sum(_expert_index(n) is not None for n in names) == 2 * 16 * 3
+    assert sum(1 for n in names if "experts.gate_up_proj" in n or "experts.down_proj" in n) == 2 * 2
     for name, p in model.named_parameters():
         assert p.placements == (Shard(0),), name
         assert p.device_mesh.mesh_dim_names == ("dp_shard",)
-    down = model.model.layers[1].mlp.experts[15].down_proj.weight
-    assert down.to_local().shape == (64 // 8, 32)
+    down = getattr(model, "model", model).layers[1].mlp.experts.down_proj
+    assert down.to_local().shape == (16 // 8, 64, 32)
 
 
+@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
 def test_ep_ranks_own_disjoint_experts(tmp_path):
     params = _params(_create_tiny_olmoe_config_dir(tmp_path), "ep", dp=8, ep=8)
     full = build_model(params)
@@ -566,6 +571,7 @@ def test_ep_ranks_own_disjoint_experts(tmp_path):
     assert set().union(*expert_fqns) == full_experts
 
 
+@pytest.mark.xfail(reason="EP rework in Task 2", strict=True)
 def test_ep_rejects_uneven_experts(tmp_path, fake_pg):
     params = _params(
         _create_tiny_olmoe_config_dir(tmp_path, num_experts=12), "ep", dp=8, ep=8

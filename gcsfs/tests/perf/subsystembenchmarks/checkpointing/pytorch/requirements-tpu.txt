@@ -1,0 +1,2 @@
+-r requirements.txt
+torch_tpu==0.2.0

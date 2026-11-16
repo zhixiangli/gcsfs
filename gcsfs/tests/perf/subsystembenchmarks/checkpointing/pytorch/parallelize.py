@@ -25,17 +25,18 @@ def _keep(modules: nn.ModuleList, begin: int, count: int) -> nn.ModuleDict:
 def split_stage(model: nn.Module, stage: int, num_stages: int) -> None:
     """Keeps only this stage's modules. State-dict layout only: the ModuleDict
     below breaks HF forward, which iterates layers as a list."""
-    if model.config.tie_word_embeddings:
+    if getattr(model.config, "tie_word_embeddings", False):
         raise ValueError("split_stage does not support tie_word_embeddings")
-    layers = model.model.layers
+    inner = getattr(model, "model", model)
+    layers = inner.layers
     if len(layers) % num_stages:
         raise ValueError(f"{len(layers)} layers do not split into {num_stages} stages")
     per_stage = len(layers) // num_stages
-    model.model.layers = _keep(layers, stage * per_stage, per_stage)
+    inner.layers = _keep(layers, stage * per_stage, per_stage)
     if stage != 0:
-        model.model.embed_tokens = None
+        inner.embed_tokens = None
     if stage != num_stages - 1:
-        model.model.norm = None
+        inner.norm = None
         model.lm_head = None
 
 

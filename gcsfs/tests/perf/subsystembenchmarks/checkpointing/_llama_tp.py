@@ -14,6 +14,9 @@ def apply_llama_tp(model, tp_mesh) -> None:
         "model.embed_tokens": RowwiseParallel(
             input_layouts=Replicate(), output_layouts=Replicate()
         ),
+        "embed_tokens": RowwiseParallel(
+            input_layouts=Replicate(), output_layouts=Replicate()
+        ),
         "lm_head": ColwiseParallel(output_layouts=Replicate()),
     }
     present = {name for name, _ in model.named_modules()}
@@ -33,5 +36,5 @@ def apply_llama_tp(model, tp_mesh) -> None:
         "mlp.down_proj": RowwiseParallel(),
     }
     # children() yields the layers of both an nn.ModuleList and a stage's nn.ModuleDict.
-    for layer in model.model.layers.children():
+    for layer in getattr(model, "model", model).layers.children():
         parallelize_module(layer, tp_mesh, layer_plan)
