@@ -36,7 +36,7 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
     setup_distributed_env(rank, world_size, port)
     try:
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // world_size))
-        model, optim = build(params, params.target_layout(), SETUP_SEED)
+        model, optim = build(params, params.source_layout(), SETUP_SEED)
         state = get_fqn_state_dict(model, optim)
         dcp.save(state, storage_writer=FsspecWriter(prefix))
         q.put(None)
@@ -96,7 +96,12 @@ def _rank_load(rank, world_size, port, prefix, params, q, *, stats_dir):
 
 class PyTorchCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
-        run_split(prefix, params, _rank_setup_checkpoint)
+        run_split(
+            prefix,
+            params,
+            _rank_setup_checkpoint,
+            world_size_override=params.source_layout().world_size,
+        )
 
     def run(self, prefix, params):
         with tempfile.TemporaryDirectory() as stats_dir:
