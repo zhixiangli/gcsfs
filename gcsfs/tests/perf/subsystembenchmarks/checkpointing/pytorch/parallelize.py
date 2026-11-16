@@ -4,15 +4,16 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import Shard, distribute_tensor
 
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.layout import (
     STRATEGY_MESH_DIMS,
+    Layout,
 )
 
 
-def build_mesh(params) -> DeviceMesh:
-    dims = params.mesh_dims()
+def build_mesh(layout: Layout, device_type: str = "cpu") -> DeviceMesh:
+    dims = layout.mesh_dims()
     return init_device_mesh(
-        "cpu",
+        device_type,
         tuple(size for _, size in dims),
         mesh_dim_names=tuple(name for name, _ in dims),
     )
@@ -71,16 +72,16 @@ def shard_experts(model: nn.Module, mesh: DeviceMesh) -> set[nn.Parameter]:
     return sharded
 
 
-def parallelize(model: nn.Module, mesh: DeviceMesh, params) -> nn.Module:
-    if params.strategy not in STRATEGY_MESH_DIMS:
-        raise ValueError(f"Unsupported strategy {params.strategy!r}")
-    dims = STRATEGY_MESH_DIMS[params.strategy]
+def parallelize(model: nn.Module, mesh: DeviceMesh, layout: Layout) -> nn.Module:
+    if layout.strategy not in STRATEGY_MESH_DIMS:
+        raise ValueError(f"Unsupported strategy {layout.strategy!r}")
+    dims = STRATEGY_MESH_DIMS[layout.strategy]
     if "pp" in dims:
         split_stage(model, mesh["pp"].get_local_rank(), mesh["pp"].size())
     if "tp" in dims:
         apply_llama_tp(model, mesh["tp"])
     ignored: set[nn.Parameter] = set()
-    if params.strategy == "ep":
+    if layout.strategy == "ep":
         # EP reuses the dp_shard ranks, sharding fused 3D experts along dim 0.
         ignored = shard_experts(model, mesh["dp_shard"])
 
@@ -89,7 +90,7 @@ def parallelize(model: nn.Module, mesh: DeviceMesh, params) -> nn.Module:
         dp_mesh = mesh[dp_dims]
         for layer in getattr(model, "model", model).layers.children():
             placement_fn = None
-            if params.strategy != "ep" and hasattr(layer.mlp, "experts"):
+            if layout.strategy != "ep" and hasattr(layer.mlp, "experts"):
                 placement_fn = (
                     lambda param, _exp=set(layer.mlp.experts.parameters()): Shard(1)
                     if param in _exp

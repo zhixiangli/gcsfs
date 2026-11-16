@@ -313,12 +313,13 @@ def test_parallelize_placements(
     norm_placements,
 ):
     params = _params(_create_tiny_llama_config_dir(tmp_path), **sizes)
+    layout = params.target_layout()
     model = build_model(params)
-    mesh = build_mesh(params)
+    mesh = build_mesh(layout)
     assert mesh.mesh_dim_names == dim_names
     assert tuple(mesh.shape) == shape
 
-    model = parallelize(model, mesh, params)
+    model = parallelize(model, mesh, layout)
     layer = model.model.layers[0]
     assert layer.self_attn.q_proj.weight.placements == q_placements
     assert layer.self_attn.o_proj.weight.placements == o_placements
@@ -331,15 +332,16 @@ def test_parallelize_placements(
 
 def test_parallelize_rejects_unknown_strategy(tmp_path, fake_pg):
     params = _params(_create_tiny_llama_config_dir(tmp_path), "fsdp", dp=8)
-    mesh = build_mesh(params)
+    mesh = build_mesh(params.target_layout())
     params.strategy = "ddp"
     with pytest.raises(ValueError, match="ddp"):
-        parallelize(build_model(params), mesh, params)
+        parallelize(build_model(params), mesh, params.target_layout())
 
 
 def _parallel_state(tmp_path, **sizes):
     params = _params(_create_tiny_llama_config_dir(tmp_path), **sizes)
-    model = parallelize(build_model(params), build_mesh(params), params)
+    layout = params.target_layout()
+    model = parallelize(build_model(params), build_mesh(layout), layout)
     materialize(model, seed=0)
     optim = build_optimizer(model, seed=0)
     return model, get_fqn_state_dict(model, optim)
@@ -441,10 +443,11 @@ def test_pp_stages_partition_state(tmp_path, sizes, world_size, q_placements):
             "fake", store=FakeStore(), rank=rank, world_size=world_size
         )
         try:
-            mesh = build_mesh(params)
+            layout = params.target_layout()
+            mesh = build_mesh(layout)
             assert mesh.mesh_dim_names[0] == "pp"
             assert mesh["pp"].get_local_rank() == stage
-            model = parallelize(build_model(params), mesh, params)
+            model = parallelize(build_model(params), mesh, layout)
             materialize(model, seed=0)
             state = get_fqn_state_dict(model, build_optimizer(model, seed=0))
         finally:
@@ -493,7 +496,8 @@ def test_split_stage_rejects_uneven_layers(tmp_path):
 
 def test_fsdp_olmoe_slices_every_expert(tmp_path, fake_pg):
     params = _params(_create_tiny_olmoe_config_dir(tmp_path), "fsdp", dp=8)
-    model = parallelize(build_model(params), build_mesh(params), params)
+    layout = params.target_layout()
+    model = parallelize(build_model(params), build_mesh(layout), layout)
     names = [name for name, _ in model.named_parameters()]
     assert "model.layers.0.self_attn.q_norm.weight" in names
     assert "model.layers.0.mlp.gate.weight" in names
@@ -524,7 +528,8 @@ def test_ep_shards_experts_on_expert_dim(tmp_path):
     for rank in range(4):
         dist.init_process_group("fake", store=FakeStore(), rank=rank, world_size=4)
         try:
-            mesh = build_mesh(params)
+            layout = params.target_layout()
+            mesh = build_mesh(layout)
             # EP reuses the dp_shard ranks; it is not a mesh dim of its own.
             assert mesh.mesh_dim_names == ("dp_shard",)
 
@@ -533,7 +538,7 @@ def test_ep_shards_experts_on_expert_dim(tmp_path):
             assert len(sharded_set) == len(expert_names)
             assert sharded_set == {raw_model.get_parameter(n) for n in expert_names}
 
-            model = parallelize(build_model(params), mesh, params)
+            model = parallelize(build_model(params), mesh, layout)
             fsdp_managed = {
                 fp.sharded_param
                 for mod in model.modules()
@@ -572,5 +577,6 @@ def test_ep_rejects_uneven_experts(tmp_path, fake_pg):
     params = _params(
         _create_tiny_olmoe_config_dir(tmp_path, num_experts=12), "ep", dp=8, ep=8
     )
+    layout = params.target_layout()
     with pytest.raises(ValueError, match="12 experts"):
-        parallelize(build_model(params), build_mesh(params), params)
+        parallelize(build_model(params), build_mesh(layout), layout)
