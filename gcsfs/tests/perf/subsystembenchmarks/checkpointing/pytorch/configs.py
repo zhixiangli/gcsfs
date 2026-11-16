@@ -1,4 +1,3 @@
-import dataclasses
 import os
 from typing import Optional
 
@@ -7,15 +6,10 @@ import pytest
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.configurator import (
     OneFactorCheckpointConfigurator,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.hosts import HostConfig
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.parameters import (
     PyTorchCheckpointParameters,
 )
-
-
-@dataclasses.dataclass(frozen=True)
-class HostConfig:
-    nnodes: int = 1
-    nproc_per_node: int = 16
 
 
 def placement_skip_reason(
@@ -23,7 +17,7 @@ def placement_skip_reason(
     host: Optional[HostConfig] = None,
 ) -> Optional[str]:
     if host is None:
-        host = HostConfig()
+        host = HostConfig.from_env()
     capacity = host.nnodes * host.nproc_per_node
     needed = p.target_layout().world_size
     if not os.environ.get("GCSFS_SUBSYSTEM_CHECKPOINT_SOURCE_ROOT"):
@@ -35,7 +29,7 @@ def placement_skip_reason(
 
 def case_params(scenario: str, host: Optional[HostConfig] = None) -> list:
     if host is None:
-        host = HostConfig()
+        host = HostConfig.from_env()
     params = []
     for case in PyTorchCheckpointConfigurator(__file__).generate_cases():
         if case.scenario != scenario:
