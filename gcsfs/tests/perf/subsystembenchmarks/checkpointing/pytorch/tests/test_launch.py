@@ -241,6 +241,16 @@ def test_submit_script_dry_run():
         assert "--exclude=.worktrees" in out
         assert "--exclude=.superpowers" in out
         assert "--exclude=docs/superpowers" in out
+        tar_line = [
+            line for line in out.splitlines() if line.startswith("tar ")
+        ][0]
+        tar_tokens = shlex.split(tar_line)
+        repo_root = Path(tar_tokens[tar_tokens.index("-C") + 1])
+        assert (repo_root / "pyproject.toml").is_file()
+        assert (
+            repo_root
+            / "gcsfs/tests/perf/subsystembenchmarks/checkpointing/pytorch/launch/entrypoint.sh"
+        ).is_file()
         assert "kubectl apply" in out
         assert "kubectl logs" in out
 

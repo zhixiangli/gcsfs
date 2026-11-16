@@ -20,7 +20,7 @@ fi
 shift
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../../../.." && pwd)"
 
 case "${TARGET}" in
   a3ultra)
@@ -131,6 +131,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   echo "${RENDERED}"
   echo "kubectl apply -f -"
 else
+  kubectl delete jobset "${JOBSET_NAME}" -n default --ignore-not-found
   printf '%s\n' "${RENDERED}" | kubectl apply -f -
 fi
 
