@@ -53,21 +53,31 @@ def verify_state(state: dict, seed: int) -> list[str]:
     bad: list[str] = []
     for name, t in _tensors(state):
         fqn = _state_name_to_fqn(state, name)
-        local_cpu = (t.to_local() if isinstance(t, DTensor) else t).detach().cpu()
+        local = (t.to_local() if isinstance(t, DTensor) else t).detach()
+        cmp_device = (
+            local.device
+            if local.device.type == "cuda"
+            else torch.device("cpu")
+        )
+        local_cmp = local if local.device == cmp_device else local.cpu()
         if fqn == "step" or fqn.endswith(".step"):
-            if not torch.equal(local_cpu, torch.tensor(seed, dtype=local_cpu.dtype)):
+            if not torch.equal(
+                local_cmp,
+                torch.tensor(seed, dtype=local_cmp.dtype, device=cmp_device),
+            ):
                 bad.append(name)
             continue
         global_shape, offset = local_region(t)
         exp = expected(
-            tuple(local_cpu.shape),
+            tuple(local_cmp.shape),
             global_shape,
             offset,
             seed,
             fqn,
-            dtype=local_cpu.dtype,
+            dtype=local_cmp.dtype,
+            device=cmp_device,
         )
-        if not torch.equal(local_cpu, exp):
+        if not torch.equal(local_cmp, exp):
             bad.append(name)
     return sorted(bad)
 

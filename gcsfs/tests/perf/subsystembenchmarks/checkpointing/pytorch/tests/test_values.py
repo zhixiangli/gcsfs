@@ -177,3 +177,15 @@ def test_verify_state_names_mismatch(tmp_path):
         assert verify_state(state, seed=5) == []
     finally:
         dist.destroy_process_group()
+
+
+def test_expected_accepts_device_argument():
+    cpu_t = values.expected(
+        (4, 8), (8, 8), (4, 0), seed=9, fqn="layer.0.weight", device="cpu"
+    )
+    assert cpu_t.device.type == "cpu"
+    assert torch.equal(
+        cpu_t,
+        values.expected((4, 8), (8, 8), (4, 0), seed=9, fqn="layer.0.weight"),
+    )
+

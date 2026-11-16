@@ -6,8 +6,10 @@ import dataclasses
 import datetime
 import gc
 import importlib
+import math
 import os
 import pickle
+import re
 import signal
 import socket
 import sys
@@ -46,6 +48,7 @@ _DEFAULT_MASTER_PORTS: dict[tuple[int, str | None], int] = {}
 # Ports that ensure_leader_store populated into os.environ["GCSFS_SUBSYSTEM_MASTER_PORT"].
 _AUTO_SET_ENV_PORTS: set[str] = set()
 _ATEXIT_REGISTERED = False
+_INITIAL_TPU_TOPOLOGY: str | None = os.environ.get("TORCH_TPU_TOPOLOGY")
 
 
 class PhaseError(RuntimeError, ProcessRaisedException):
@@ -324,6 +327,133 @@ def _find_phase_port(store_port: int) -> int:
             return s.getsockname()[1]
 
 
+def _pick_distinct_free_ports(count: int, exclude: set[int]) -> list[int]:
+    holders: list[socket.socket] = []
+    ports: list[int] = []
+    try:
+        while len(ports) < count:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("", 0))
+            p = s.getsockname()[1]
+            holders.append(s)
+            if p not in exclude and p not in ports:
+                ports.append(p)
+        return ports
+    finally:
+        for s in holders:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def _build_tpu_phase_env(
+    world_size: int,
+    job_id: int,
+    host: HostConfig,
+    store: dist.TCPStore | None,
+    phase_port: int,
+) -> dict[str, str]:
+    tpu_mod = getattr(torch, "tpu", None)
+    props = (
+        tpu_mod.get_device_properties()
+        if (tpu_mod is not None and hasattr(tpu_mod, "get_device_properties"))
+        else None
+    )
+    if world_size <= host.nproc_per_node:
+        if props is not None:
+            topo = ",".join(map(str, props.topology(world_size)))
+        else:
+            topo = os.environ.get("TORCH_TPU_TOPOLOGY", "2,2,1,2")
+        ports = _pick_distinct_free_ports(
+            world_size, exclude={host.master_port, phase_port}
+        )
+        addrs = ",".join(f"localhost:{p}" for p in ports)
+        return {
+            "tpu_topology": topo,
+            "tpu_slicebuilder_addresses": addrs,
+            "tpu_devices_per_host": str(world_size),
+        }
+
+    num_hosts = (world_size + host.nproc_per_node - 1) // host.nproc_per_node
+    cores = getattr(props, "devices_per_chip", 2) if props is not None else 2
+    env_topo = (
+        os.environ.get("TOPOLOGY")
+        or _INITIAL_TPU_TOPOLOGY
+        or os.environ.get("TORCH_TPU_TOPOLOGY", "")
+    )
+    parts: list[int] = []
+    if env_topo:
+        try:
+            parts = [int(p) for p in re.split(r"[,xX]", env_topo) if p]
+        except ValueError:
+            parts = []
+
+    if len(parts) == 4 and math.prod(parts) == world_size:
+        topo = ",".join(map(str, parts))
+    elif len(parts) == 3 and math.prod(parts) * cores == world_size:
+        topo = ",".join(map(str, [*parts, cores]))
+    elif props is not None:
+        host_topo = list(props.topology(host.nproc_per_node))
+        if len(host_topo) >= 3:
+            host_topo[2] *= num_hosts
+        topo = ",".join(map(str, host_topo))
+    else:
+        topo = f"2,2,{num_hosts},{cores}"
+
+    env_hosts = [
+        h.strip()
+        for h in os.environ.get("TPU_WORKER_HOSTNAMES", "").split(",")
+        if h.strip()
+    ]
+    if len(env_hosts) >= num_hosts:
+        host_addrs = env_hosts[:num_hosts]
+    else:
+        if host.master_addr in ("localhost", "127.0.0.1"):
+            node0_addr = "localhost"
+        else:
+            try:
+                node0_addr = socket.gethostbyname(socket.gethostname())
+            except OSError:
+                node0_addr = host.master_addr
+        host_addrs = [node0_addr]
+        for k in range(1, num_hosts):
+            addr_key = f"node/{k}/addr"
+            if store is not None and store.check([addr_key]):
+                host_addrs.append(store.get(addr_key).decode("utf-8"))
+            else:
+                host_addrs.append(host.master_addr)
+
+    base_port = 18070 + ((job_id * 32) % 20000)
+    addrs = ",".join(
+        f"{host_addrs[r // host.nproc_per_node]}:{base_port + (r % host.nproc_per_node)}"
+        for r in range(world_size)
+    )
+    return {
+        "tpu_topology": topo,
+        "tpu_slicebuilder_addresses": addrs,
+        "tpu_devices_per_host": str(host.nproc_per_node),
+    }
+
+
+def _apply_tpu_phase_env(spec: dict[str, Any], host: HostConfig) -> None:
+    if host.device != "tpu":
+        return
+    if "tpu_topology" in spec:
+        os.environ["TORCH_TPU_TOPOLOGY"] = str(spec["tpu_topology"])
+    if "tpu_slicebuilder_addresses" in spec:
+        os.environ["TORCH_TPU_SLICEBUILDER_ADDRESSES"] = str(
+            spec["tpu_slicebuilder_addresses"]
+        )
+    if "tpu_devices_per_host" in spec:
+        os.environ["TORCH_TPU_DEVICES_PER_HOST"] = str(
+            spec["tpu_devices_per_host"]
+        )
+    if int(spec["world_size"]) <= host.nproc_per_node:
+        os.environ.pop("TPU_WORKER_HOSTNAMES", None)
+
+
+
 def _set_pdeathsig(parent_pid: int) -> None:
     if sys.platform != "linux":
         return
@@ -383,6 +513,11 @@ def _rank_entry(
     local_rank = rank - host.node_rank * host.nproc_per_node
     world_size = int(spec["world_size"])
     port = int(spec["port"])
+    _apply_tpu_phase_env(spec, host)
+    if host.device in ("cuda", "tpu"):
+        torch.set_num_threads(
+            max(1, min(16, (os.cpu_count() or 8) // max(1, local_world_size)))
+        )
 
     store = dist.TCPStore(
         host_name=host.master_addr,
@@ -430,6 +565,7 @@ def spawn_local_ranks(
     ranks = local_ranks(int(spec["world_size"]), host)
     if len(ranks) == 0:
         return None
+    _apply_tpu_phase_env(spec, host)
     return mp.spawn(
         _rank_entry,
         args=(ranks.start, len(ranks), job_id, spec, host, os.getpid()),
@@ -564,10 +700,22 @@ def run_phase(
             f"(nnodes={resolved_host.nnodes}, nproc_per_node={resolved_host.nproc_per_node})"
         )
     store = get_store(resolved_host)
+    timeout_s = _pg_timeout_s()
+    if resolved_host.nnodes > 1:
+        hb_keys = [f"node/{k}/heartbeat" for k in range(1, resolved_host.nnodes)]
+        ready_deadline = time.monotonic() + timeout_s
+        while not store.check(hb_keys):
+            if time.monotonic() > ready_deadline:
+                raise PhaseError(
+                    f"timed out after {timeout_s}s waiting for worker nodes "
+                    f"1..{resolved_host.nnodes - 1} to connect to TCPStore"
+                )
+            time.sleep(_POLL_INTERVAL_S)
+
     port = _find_phase_port(resolved_host.master_port)
     job_id = store.add("job/next_id", 1) - 1
 
-    spec = {
+    spec: dict[str, Any] = {
         "fn_ref": fn_ref,
         "world_size": world_size,
         "prefix": prefix,
@@ -575,13 +723,18 @@ def run_phase(
         "kwargs": kwargs,
         "port": port,
     }
+    if resolved_host.device == "tpu":
+        spec.update(
+            _build_tpu_phase_env(
+                world_size, job_id, resolved_host, store, port
+            )
+        )
     store.set(f"job/{job_id}", pickle.dumps(spec))
 
     context = spawn_local_ranks(job_id, spec, resolved_host)
     if context is None:
         store.set(f"job/{job_id}/node/{resolved_host.node_rank}", "ok")
 
-    timeout_s = _pg_timeout_s()
     deadline = time.monotonic() + timeout_s
     hb_monitor = _HeartbeatMonitor(store, resolved_host)
     all_rank_keys = [f"job/{job_id}/rank/{r}" for r in range(world_size)]

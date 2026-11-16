@@ -47,6 +47,7 @@ else
 fi
 run_cmd "python3 -m venv --system-site-packages ${VENV_DIR}"
 run_cmd ". ${VENV_DIR}/bin/activate"
+unset PIP_CONSTRAINT
 run_cmd "pip install -r ${REQ_FILE}"
 export SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0"
 run_cmd "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 pip install -e ."
@@ -64,7 +65,20 @@ done
 
 # 4. On tpu, initialize TorchTPU distributed slice environment.
 if [ "${DEVICE}" = "tpu" ]; then
-  run_cmd "eval \$(python -m torch.tpu.distributed | sed 's/^/export /')"
+  if [ -z "${TPU_WORKER_HOSTNAMES:-}" ]; then
+    if [ "${NNODES}" -gt 1 ] && [[ "${MASTER_ADDR}" == *-0.* ]]; then
+      _HOST_PREFIX="${MASTER_ADDR%-0.*}"
+      _HOST_SUFFIX="${MASTER_ADDR##*-0.}"
+      _HOSTS=()
+      for ((_i=0; _i<NNODES; _i++)); do
+        _HOSTS+=("${_HOST_PREFIX}-${_i}.${_HOST_SUFFIX}")
+      done
+      export TPU_WORKER_HOSTNAMES="$(IFS=,; echo "${_HOSTS[*]}")"
+    else
+      export TPU_WORKER_HOSTNAMES="${MASTER_ADDR}"
+    fi
+  fi
+  run_cmd "eval \$(python -m torch.tpu.distributed | grep -E '^TORCH_TPU_[A-Z0-9_]+=' | sed 's/^/export /')"
 fi
 
 # 5. Export node environment and run leader (index 0) or worker (index > 0).
@@ -74,6 +88,7 @@ export GCSFS_SUBSYSTEM_NODE_RANK="${JOB_COMPLETION_INDEX}"
 export GCSFS_SUBSYSTEM_MASTER_ADDR="${MASTER_ADDR}"
 export GCSFS_SUBSYSTEM_MASTER_PORT="${MASTER_PORT}"
 export GCSFS_SUBSYSTEM_PORT_BASE="${MASTER_PORT}"
+export GCSFS_SUBSYSTEM_PG_TIMEOUT_S="${GCSFS_SUBSYSTEM_PG_TIMEOUT_S:-300}"
 if [ "${DRY_RUN:-0}" = "1" ]; then
   echo "export GCSFS_SUBSYSTEM_DEVICE=${DEVICE}"
   echo "export GCSFS_SUBSYSTEM_NNODES=${NNODES}"

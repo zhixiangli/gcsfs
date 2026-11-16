@@ -4,6 +4,7 @@ import argparse
 import datetime
 import os
 import pickle
+import socket
 import threading
 import time
 
@@ -80,6 +81,14 @@ def main(argv: list[str] | None = None) -> int:
         timeout=datetime.timedelta(seconds=timeout_s),
     )
 
+    if host.master_addr in ("localhost", "127.0.0.1"):
+        local_addr = "localhost"
+    else:
+        try:
+            local_addr = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            local_addr = socket.gethostname()
+    store.set(f"node/{host.node_rank}/addr", local_addr)
     store.set(f"node/{host.node_rank}/heartbeat", "0")
     stop_event = threading.Event()
     hb_thread = threading.Thread(

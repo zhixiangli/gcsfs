@@ -176,7 +176,10 @@ def test_entrypoint_branches():
         "gcloud storage cp -r gs://gcs-aiml-huggingface-model-weights/OLMoE-1B-7B-0924/config.json /tmp/OLMoE-1B-7B-0924/"
         in worker_out
     )
-    assert "eval $(python -m torch.tpu.distributed | sed 's/^/export /')" in worker_out
+    assert (
+        "eval $(python -m torch.tpu.distributed | grep -E '^TORCH_TPU_[A-Z0-9_]+=' | sed 's/^/export /')"
+        in worker_out
+    )
     assert "export GCSFS_SUBSYSTEM_DEVICE=tpu" in worker_out
     assert "export GCSFS_SUBSYSTEM_NNODES=2" in worker_out
     assert "export GCSFS_SUBSYSTEM_NODE_RANK=1" in worker_out

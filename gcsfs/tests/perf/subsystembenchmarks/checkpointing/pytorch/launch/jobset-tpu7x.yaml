@@ -58,6 +58,8 @@ spec:
                       value: "tpu"
                     - name: NNODES
                       value: "${NNODES}"
+                    - name: TOPOLOGY
+                      value: "${TOPOLOGY}"
                     - name: MASTER_ADDR
                       value: "dcp-tpu7x-slice-job-0-0.dcp-tpu7x"
                     - name: MASTER_PORT

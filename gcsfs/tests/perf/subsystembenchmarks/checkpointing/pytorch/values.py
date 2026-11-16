@@ -55,14 +55,17 @@ def _fill_region(
     if numel <= chunk_elements:
         ndim = len(local_shape)
         if ndim == 0:
-            idx = torch.zeros(1, dtype=torch.int64)
+            idx = torch.zeros(1, dtype=torch.int64, device=out.device)
             out.copy_(_splitmix64_bf16(idx, key, dtype).reshape(()))
             return
-        idx = torch.zeros(local_shape, dtype=torch.int64)
+        idx = torch.zeros(local_shape, dtype=torch.int64, device=out.device)
         for d, (n, off, stride) in enumerate(zip(local_shape, offset, strides)):
             shape = [1] * ndim
             shape[d] = n
-            axis = torch.arange(off, off + n, dtype=torch.int64) * stride
+            axis = (
+                torch.arange(off, off + n, dtype=torch.int64, device=out.device)
+                * stride
+            )
             idx.add_(axis.reshape(shape))
         out.copy_(
             _splitmix64_bf16(idx.reshape(-1), key, dtype).reshape(local_shape)
@@ -94,6 +97,7 @@ def expected(
     seed: int,
     fqn: str,
     dtype: torch.dtype = torch.bfloat16,
+    device: torch.device | str = "cpu",
 ) -> torch.Tensor:
     local_shape = tuple(local_shape)
     global_shape = tuple(global_shape)
@@ -105,7 +109,7 @@ def expected(
             f"global_shape={global_shape}, offset={offset}"
         )
 
-    out = torch.empty(local_shape, dtype=dtype, device="cpu")
+    out = torch.empty(local_shape, dtype=dtype, device=device)
     if out.numel() == 0:
         return out
 
@@ -128,8 +132,15 @@ def expected(
 def fill_(t: torch.Tensor, seed: int, fqn: str) -> None:
     global_shape, offset = local_region(t)
     local = t.to_local() if isinstance(t, DTensor) else t
+    gen_device = local.device if local.device.type == "cuda" else "cpu"
     vals = expected(
-        tuple(local.shape), global_shape, offset, seed, fqn, dtype=local.dtype
+        tuple(local.shape),
+        global_shape,
+        offset,
+        seed,
+        fqn,
+        dtype=local.dtype,
+        device=gen_device,
     )
     with torch.no_grad():
         local.copy_(vals)

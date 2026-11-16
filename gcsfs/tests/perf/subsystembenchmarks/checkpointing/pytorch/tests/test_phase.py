@@ -388,3 +388,47 @@ def test_durations_are_max_over_ranks():
     assert phase_durations(results) == pytest.approx([2.25, 4.5])
     assert phase_durations([]) == []
     assert phase_durations([{}]) == []
+
+
+def test_tpu_phase_spec_populates_per_phase_slice_env(monkeypatch):
+    import types
+    import torch
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch import phase
+
+    class _FakeProps:
+        devices_per_chip = 2
+
+        @staticmethod
+        def topology(world_size=None):
+            mapping = {
+                2: (1, 1, 1, 2),
+                4: (1, 2, 1, 2),
+                8: (2, 2, 1, 2),
+            }
+            return mapping[world_size or 8]
+
+    fake_tpu = types.SimpleNamespace(get_device_properties=lambda: _FakeProps())
+    monkeypatch.setattr(torch, "tpu", fake_tpu, raising=False)
+
+    host_1n = HostConfig(
+        device="tpu", nnodes=1, node_rank=0, master_addr="localhost", nproc_per_node=8
+    )
+    env_4 = phase._build_tpu_phase_env(4, job_id=0, host=host_1n, store=None, phase_port=29600)
+    assert env_4["tpu_topology"] == "1,2,1,2"
+    assert env_4["tpu_devices_per_host"] == "4"
+    addrs_4 = env_4["tpu_slicebuilder_addresses"].split(",")
+    assert len(addrs_4) == 4
+    assert all(a.startswith("localhost:") for a in addrs_4)
+
+    host_2n = HostConfig(
+        device="tpu", nnodes=2, node_rank=0, master_addr="10.0.0.1", nproc_per_node=8
+    )
+    monkeypatch.setenv("TPU_WORKER_HOSTNAMES", "10.0.0.1,10.0.0.2")
+    env_16 = phase._build_tpu_phase_env(16, job_id=3, host=host_2n, store=None, phase_port=29600)
+    assert env_16["tpu_topology"] == "2,2,2,2"
+    assert env_16["tpu_devices_per_host"] == "8"
+    addrs_16 = env_16["tpu_slicebuilder_addresses"].split(",")
+    assert len(addrs_16) == 16
+    assert all(a.startswith("10.0.0.1:") for a in addrs_16[:8])
+    assert all(a.startswith("10.0.0.2:") for a in addrs_16[8:])
+
