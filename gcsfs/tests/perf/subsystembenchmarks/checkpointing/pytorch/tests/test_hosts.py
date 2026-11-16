@@ -37,6 +37,15 @@ _HOST_ENV_KEYS = (
     "GCSFS_SUBSYSTEM_PORT_BASE",
     "GCSFS_SUBSYSTEM_NPROC_PER_NODE",
     "GCSFS_SUBSYSTEM_PG_TIMEOUT_S",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+    "WORLD_SIZE",
+    "RANK",
+    "LOCAL_RANK",
+    "GLOO_SOCKET_IFNAME",
+    "NCCL_TUNER_PLUGIN",
+    "NCCL_PROFILER_PLUGIN",
+    "NCCL_NET_PLUGIN",
 )
 
 
@@ -236,6 +245,8 @@ def test_init_rank_sets_env_and_gloo_lo_only_for_localhost(monkeypatch):
 
 def test_init_rank_cuda_and_tpu_binding(monkeypatch):
     monkeypatch.setenv("GCSFS_SUBSYSTEM_PG_TIMEOUT_S", "600")
+    for key in ("NCCL_TUNER_PLUGIN", "NCCL_PROFILER_PLUGIN", "NCCL_NET_PLUGIN"):
+        monkeypatch.delenv(key, raising=False)
     with (
         mock.patch.object(torch.cuda, "set_device") as mock_set_cuda,
         mock.patch.object(dist, "init_process_group") as mock_init_pg,
@@ -249,6 +260,9 @@ def test_init_rank_cuda_and_tpu_binding(monkeypatch):
         )
         dev = init_rank(rank=10, world_size=16, host=cuda_host, port=29602)
         assert dev == torch.device("cuda", 2)
+        assert os.environ["NCCL_TUNER_PLUGIN"] == "none"
+        assert os.environ["NCCL_PROFILER_PLUGIN"] == "none"
+        assert os.environ["NCCL_NET_PLUGIN"] == "none"
         mock_set_cuda.assert_called_once_with(2)
         mock_init_pg.assert_called_once_with(
             "nccl",

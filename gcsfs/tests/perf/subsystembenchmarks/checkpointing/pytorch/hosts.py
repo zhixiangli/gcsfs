@@ -95,6 +95,9 @@ def init_rank(rank: int, world_size: int, host: HostConfig, port: int) -> torch.
     if host.device == "cpu":
         device = torch.device("cpu")
     elif host.device == "cuda":
+        os.environ.setdefault("NCCL_TUNER_PLUGIN", "none")
+        os.environ.setdefault("NCCL_PROFILER_PLUGIN", "none")
+        os.environ.setdefault("NCCL_NET_PLUGIN", "none")
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
     else:

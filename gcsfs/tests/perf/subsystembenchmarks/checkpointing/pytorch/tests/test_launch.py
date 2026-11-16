@@ -125,6 +125,7 @@ def test_entrypoint_branches():
             **common_env,
             "DEVICE": "cuda",
             "JOB_COMPLETION_INDEX": "0",
+            "LD_LIBRARY_PATH": "/usr/local/lib/python3.12/dist-packages/torch/lib",
         },
         capture_output=True,
         text=True,

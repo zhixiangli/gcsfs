@@ -68,8 +68,16 @@ for raw_model in "${_MODELS[@]}"; do
   fi
 done
 
-# 4. On tpu, initialize TorchTPU distributed slice environment.
-if [ "${DEVICE}" = "tpu" ]; then
+# 4. Configure device-specific runtime environment.
+if [ "${DEVICE}" = "cuda" ]; then
+  export NCCL_TUNER_PLUGIN="${NCCL_TUNER_PLUGIN:-none}"
+  export NCCL_PROFILER_PLUGIN="${NCCL_PROFILER_PLUGIN:-none}"
+  export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+  if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    LD_LIBRARY_PATH="$(echo "${LD_LIBRARY_PATH}" | tr ':' '\n' | { grep -v '/dist-packages/torch/lib' || true; } | paste -sd: -)"
+    export LD_LIBRARY_PATH
+  fi
+elif [ "${DEVICE}" = "tpu" ]; then
   if [ -z "${TPU_WORKER_HOSTNAMES:-}" ]; then
     if [ "${NNODES}" -gt 1 ] && [[ "${MASTER_ADDR}" == *-0.* ]]; then
       _HOST_PREFIX="${MASTER_ADDR%-0.*}"
