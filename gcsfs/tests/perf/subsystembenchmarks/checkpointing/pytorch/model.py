@@ -1,14 +1,12 @@
-import hashlib
 import os
 import tempfile
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import gcsfs
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.values import fill_
 
 
 def _resolve_model_config(model_id: str) -> AutoConfig:
@@ -35,46 +33,34 @@ def build_model(params) -> nn.Module:
     return model
 
 
-def _shard_generator(seed: int, name: str, t: torch.Tensor) -> torch.Generator:
-    """Seeds by shard, not by rank.
-
-    Shards of one tensor get different bytes, so the per-rank checksum catches a
-    reader that serves another rank's shard. Replicas (TP norms, HSDP replicate
-    groups) get identical bytes, which dcp.save relies on when it keeps a single
-    copy of a replicated tensor.
-    """
-    offset = ()
-    if isinstance(t, DTensor):
-        _, offset = compute_local_shape_and_global_offset(
-            t.shape, t.device_mesh, t.placements
-        )
-    digest = hashlib.sha256(f"{seed}|{name}|{tuple(offset)}".encode()).digest()
-    return torch.Generator().manual_seed(int.from_bytes(digest[:8], "little"))
-
-
-def materialize(model: nn.Module, seed: int) -> None:
-    model.to_empty(device="cpu")
+def materialize(
+    model: nn.Module, seed: int, device: torch.device | str = torch.device("cpu")
+) -> None:
+    model.to_empty(device=device)
     for fqn, p in model.named_parameters():
         p.requires_grad_(True)
-        torch.nn.init.normal_(
-            p.to_local() if isinstance(p, DTensor) else p,
-            std=0.02,
-            generator=_shard_generator(seed, fqn, p),
-        )
+        fill_(p, seed, fqn)
+
+
+def _adamw(params, seed: int) -> torch.optim.AdamW:
+    # A seed-dependent lr makes the saved param_groups differ between seeds,
+    # so a reader that skips the BYTE_IO items fails verify_state too.
+    return torch.optim.AdamW(params, lr=1e-3 * (seed + 1))
+
+
+def expected_param_group(seed: int) -> dict:
+    """The non-tensor param_groups values build_optimizer(..., seed) saves per FQN."""
+    group = _adamw([torch.empty(0)], seed).param_groups[0]
+    return {k: v for k, v in group.items() if k != "params"}
 
 
 def build_optimizer(model: nn.Module, seed: int) -> torch.optim.AdamW:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer = _adamw(model.parameters(), seed)
     for fqn, p in model.named_parameters():
         state = optimizer.state[p]
         state["step"] = torch.tensor(seed, dtype=torch.int64)
         state["exp_avg"] = torch.empty_like(p)
         state["exp_avg_sq"] = torch.empty_like(p)
-        exp_avg, exp_avg_sq = (
-            t.to_local() if isinstance(t, DTensor) else t
-            for t in (state["exp_avg"], state["exp_avg_sq"])
-        )
-        generator = _shard_generator(seed, f"{fqn}.optim", p)
-        exp_avg.normal_(generator=generator)
-        exp_avg_sq.uniform_(generator=generator)
+        fill_(state["exp_avg"], seed, f"{fqn}.exp_avg")
+        fill_(state["exp_avg_sq"], seed, f"{fqn}.exp_avg_sq")
     return optimizer

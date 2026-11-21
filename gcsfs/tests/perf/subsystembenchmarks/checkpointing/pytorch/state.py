@@ -3,6 +3,14 @@ import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 from torch.distributed.tensor import DTensor
 
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.model import (
+    expected_param_group,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.values import (
+    expected,
+    local_region,
+)
+
 # Keys param_groups by FQN. Unflattened, it is one list per rank that differs across
 # PP stages, and DCP saves only one rank's copy of it.
 STATE_DICT_OPTIONS = StateDictOptions(flatten_optimizer_state_dict=True)
@@ -13,16 +21,66 @@ def get_fqn_state_dict(model, optim) -> dict:
     return {"model": model_state, "optim": optim_state}
 
 
-def _local_tensors(state, prefix=""):
+def _tensors(state, prefix=""):
     items = state.items() if isinstance(state, dict) else enumerate(state)
     for key, value in items:
         name = f"{prefix}{key}"
-        if isinstance(value, DTensor):
-            yield name, value.to_local()
-        elif isinstance(value, torch.Tensor):
+        if isinstance(value, (DTensor, torch.Tensor)):
             yield name, value
         elif isinstance(value, (dict, list, tuple)):
-            yield from _local_tensors(value, f"{name}.")
+            yield from _tensors(value, f"{name}.")
+
+
+def _local_tensors(state, prefix=""):
+    for name, value in _tensors(state, prefix):
+        yield name, value.to_local() if isinstance(value, DTensor) else value
+
+
+def _state_name_to_fqn(state: dict, name: str) -> str:
+    if isinstance(state, dict):
+        if name.startswith("model.") and isinstance(
+            state.get("model"), (dict, list, tuple)
+        ):
+            return name[len("model.") :]
+        if isinstance(state.get("optim"), (dict, list, tuple)):
+            if name.startswith("optim.state."):
+                return name[len("optim.state.") :]
+            if name.startswith("optim."):
+                return name[len("optim.") :]
+    if name.startswith("state."):
+        return name[len("state.") :]
+    return name
+
+
+def verify_state(state: dict, seed: int) -> list[str]:
+    bad: list[str] = []
+    for name, t in _tensors(state):
+        fqn = _state_name_to_fqn(state, name)
+        local_cpu = (t.to_local() if isinstance(t, DTensor) else t).detach().cpu()
+        if fqn == "step" or fqn.endswith(".step"):
+            if not torch.equal(local_cpu, torch.tensor(seed, dtype=local_cpu.dtype)):
+                bad.append(name)
+            continue
+        global_shape, offset = local_region(t)
+        exp = expected(
+            tuple(local_cpu.shape),
+            global_shape,
+            offset,
+            seed,
+            fqn,
+            dtype=local_cpu.dtype,
+        )
+        if not torch.equal(local_cpu, exp):
+            bad.append(name)
+    # dcp.load writes the BYTE_IO param_groups values into the state it was given.
+    group = expected_param_group(seed)
+    optim = state.get("optim") if isinstance(state, dict) else None
+    for key, value in (optim.items() if isinstance(optim, dict) else ()):
+        if key.startswith("param_groups."):
+            hp = key.rsplit(".", 1)[1]
+            if hp not in group or value != group[hp]:
+                bad.append(f"optim.{key}")
+    return sorted(bad)
 
 
 def expected_bytes_requested(state: dict) -> int:
