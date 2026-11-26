@@ -97,27 +97,26 @@ def reduce_split(results, rounds):
     return durations, rows_list, ttfb
 
 
-def spawn_rank_epochs(rank_entry, prefix, params, *rank_args):
-    """Spawn rank processes and reduce epoch metrics and dataset build time."""
+def spawn_rank_epochs(rank_entry, prefix, params, *rank_args, prepare_launch=True):
+    """Spawn rank processes and reduce epoch metrics and dataset build time.
+
+    Ranks are terminated if the parent is interrupted or a rank exits without
+    reporting. ``prepare_launch=False`` skips TPU launch setup for ranks that never
+    use an accelerator.
+    """
     import torch.multiprocessing as mp
 
-    ctx = mp.get_context("spawn")
-    with ctx.Manager() as manager:
-        queue = manager.Queue()
-        mp.spawn(
-            rank_entry,
-            args=(
-                params.world_size,
-                prefix,
-                params,
-                round_barrier(ctx, params.world_size),
-                queue,
-                *rank_args,
-            ),
-            nprocs=params.world_size,
-            join=True,
-        )
-        results = [queue.get() for _ in range(params.world_size)]
+    from gcsfs.tests.perf.subsystembenchmarks._common import spawn
+
+    barrier = round_barrier(mp.get_context("spawn"), params.world_size)
+    results, context, manager = spawn.spawn_local_ranks(
+        rank_entry,
+        lambda q: (params.world_size, prefix, params, barrier, q, *rank_args),
+        params.world_size,
+        world_size=params.world_size,
+        prepare_launch=prepare_launch,
+    )
+    spawn.join_local_ranks(context, manager)
     durations, rows, ttfb = reduce_split(results, params.rounds)
     return durations, rows, ttfb, max(result[2] for result in results)
 

@@ -147,3 +147,78 @@ def test_spawn_rank_epochs_reduces_results_and_uses_slowest_build():
     result = driver.spawn_rank_epochs(_rank_result_probe, "unused", params)
 
     assert result == ([4.0], [15], 1.9, 2.0)
+
+
+# Rank-spawn lifecycle: interrupts, missing results.
+
+
+def _sleep_after_ready(rank, world_size, prefix, params, barrier, queue):
+    import os
+    import pathlib
+    import time
+
+    (pathlib.Path(prefix) / f"ready-{rank}").write_text(str(os.getpid()))
+    time.sleep(600)
+
+
+def test_spawn_rank_epochs_terminates_ranks_on_parent_interrupt(tmp_path, monkeypatch):
+    import pathlib
+    import time
+
+    import psutil
+
+    mp = pytest.importorskip("torch.multiprocessing")
+    orig_spawn = mp.spawn
+    procs, pids = [], []
+
+    def wait_ready(nprocs):
+        ready = [pathlib.Path(tmp_path) / f"ready-{r}" for r in range(nprocs)]
+        deadline = time.monotonic() + 30.0
+        while not all(p.exists() and p.read_text().strip() for p in ready):
+            assert time.monotonic() < deadline, "ranks did not start"
+            time.sleep(0.02)
+        pids.extend(int(p.read_text()) for p in ready)
+
+    def interrupting_spawn(fn, args=(), nprocs=1, join=True, **kwargs):
+        ctx = orig_spawn(fn, args=args, nprocs=nprocs, join=False)
+        procs.extend(ctx.processes)
+        if join:  # A blocking join: the interrupt lands while it waits.
+            wait_ready(nprocs)
+            raise KeyboardInterrupt("parent interrupted")
+
+        def interrupt(timeout=None):
+            wait_ready(nprocs)
+            raise KeyboardInterrupt("parent interrupted")
+
+        args[4].get = interrupt
+        return ctx
+
+    monkeypatch.setattr(mp, "spawn", interrupting_spawn)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="parent interrupted"):
+            driver.spawn_rank_epochs(
+                _sleep_after_ready,
+                str(tmp_path),
+                SimpleNamespace(world_size=2, rounds=1),
+            )
+        alive = [pid for pid in pids if psutil.pid_exists(pid)]
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+
+    assert len(pids) == 2
+    assert alive == []
+
+
+def _exit_without_reporting(rank, world_size, prefix, params, barrier, queue):
+    return None
+
+
+@pytest.mark.timeout(60)
+def test_spawn_rank_epochs_raises_when_a_rank_exits_without_reporting():
+    with pytest.raises(RuntimeError, match="ranks exited without reporting results"):
+        driver.spawn_rank_epochs(
+            _exit_without_reporting, "unused", SimpleNamespace(world_size=2, rounds=1)
+        )

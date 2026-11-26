@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("webdataset")
 pytest.importorskip("PIL")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.webdataset import (  # noqa: E402
     configs,
     imagegen,
@@ -55,7 +56,7 @@ def prefix(tmp_path):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
@@ -102,9 +103,11 @@ def test_run_rank_epochs_feeds_its_rank_device_with_pinned_loader(
     assert sync_calls == [FAKE_GPU, FAKE_GPU]
 
 
+@pytest.mark.parametrize("kind", ["cuda", "tpu"])
 def test_run_rank_epochs_without_decode_skips_the_gpu(
-    prefix, sync_calls, ranks_on_fake_gpu, loader_kwargs
+    prefix, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs, kind
 ):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: kind)
     per_epoch, _, _ = driver.run_rank_epochs(
         0, 1, prefix, _params(decode=False), sample_count=_FILES * _ROWS
     )
@@ -154,7 +157,7 @@ def test_resampled_rounds_still_synchronize_after_stopping_at_target(
 def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     prefix, monkeypatch, sync_calls, loader_kwargs
 ):
-    monkeypatch.setattr(driver.device_lib.env, "detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
     per_epoch, _, _ = driver.run_rank_epochs(
         0, 1, prefix, _params(rounds=1), sample_count=_FILES * _ROWS
@@ -163,3 +166,59 @@ def test_run_rank_epochs_on_cpu_neither_pins_nor_synchronizes(
     assert per_epoch[0][2] == _FILES * _ROWS
     assert loader_kwargs[0]["pin_memory"] is False
     assert sync_calls == []
+
+
+def test_tpu_single_rank_decoded_isolates_in_spawned_child(prefix, monkeypatch):
+    """split_by_node=False decoded on TPU must not bind in parent."""
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    parent_binds = []
+    monkeypatch.setattr(
+        driver.device_lib, "rank_device", lambda r: parent_binds.append(r)
+    )
+    spawned = []
+
+    def fake_split(pfx, params, cache_root, sample_count):
+        spawned.append((pfx, params.world_size, params.split_by_node, sample_count))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "run_split_epochs", fake_split)
+    params = _params(split_by_node=False, world_size=1, decode=True, rounds=1)
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+    assert parent_binds == []
+    assert len(spawned) == 1
+    assert spawned[0][1] == 1
+    assert spawned[0][2] is False
+    assert res.rows_per_epoch == [_FILES * _ROWS]
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_split_run_prepares_launch_only_when_decoding(prefix, monkeypatch, decode):
+    seen = []
+
+    def fake_spawn_rank_epochs(rank_entry, pfx, params, *rank_args, **kwargs):
+        seen.append(kwargs.get("prepare_launch", True))
+        return ([0.1], [_FILES * _ROWS], 0.05, 0.01)
+
+    monkeypatch.setattr(driver, "spawn_rank_epochs", fake_spawn_rank_epochs)
+    params = _params(split_by_node=True, world_size=2, decode=decode, rounds=1)
+    driver.WebDatasetReadDriver().run_read(
+        prefix, params, {"sample_count": _FILES * _ROWS}
+    )
+    assert seen == [decode]
+
+
+def test_tpu_single_rank_undecoded_skips_prepare_launch_and_spawn(prefix, monkeypatch):
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    prepared, spawned = [], []
+    monkeypatch.setattr(accelerator, "prepare_launch", prepared.append)
+    monkeypatch.setattr(driver, "run_split_epochs", lambda *a: spawned.append(a))
+
+    res = driver.WebDatasetReadDriver().run_read(
+        prefix, _params(decode=False, rounds=1), {"sample_count": _FILES * _ROWS}
+    )
+
+    assert prepared == []
+    assert spawned == []
+    assert res.rows_per_epoch == [_FILES * _ROWS]

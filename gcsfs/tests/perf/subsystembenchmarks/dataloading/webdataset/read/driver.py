@@ -1,11 +1,13 @@
 """WebDataset image read driver for subsystem benchmarks."""
 
 import contextlib
+import dataclasses
 import os
 import shutil
 import tempfile
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
@@ -181,7 +183,7 @@ def run_rank_epochs(
             split_by_node=params.split_by_node,
             cache_dir=rank_cache_dir(cache_root, rank),
         )
-        loader = build_loader(dataset, params, pin_memory=device is not None)
+        loader = build_loader(dataset, params, pin_memory=device_lib.pin_memory(device))
         build_seconds = time.perf_counter() - build_start
 
         target = None
@@ -208,7 +210,15 @@ def _rank_entry(rank, world_size, prefix, params, barrier, queue, cache_root, sa
 
 def run_split_epochs(prefix, params, cache_root, sample_count):
     """Spawns world_size worker processes and aggregates epoch results."""
-    return spawn_rank_epochs(_rank_entry, prefix, params, cache_root, sample_count)
+    # Undecoded ranks never touch an accelerator, so they skip TPU launch setup.
+    return spawn_rank_epochs(
+        _rank_entry,
+        prefix,
+        params,
+        cache_root,
+        sample_count,
+        prepare_launch=params.decode,
+    )
 
 
 class WebDatasetReadDriver:
@@ -222,6 +232,14 @@ class WebDatasetReadDriver:
             if params.split_by_node:
                 durations, rows, ttfb, build_seconds = run_split_epochs(
                     prefix, params, cache_root, sample_count
+                )
+            elif params.decode and accelerator.device_kind() == "tpu":
+                # Isolate TPU device init inside a spawned child so pytest parent never locks libtpu.
+                durations, rows, ttfb, build_seconds = run_split_epochs(
+                    prefix,
+                    dataclasses.replace(params, world_size=1),
+                    cache_root,
+                    sample_count,
                 )
             else:
                 per_epoch, ttfb, build_seconds = run_rank_epochs(

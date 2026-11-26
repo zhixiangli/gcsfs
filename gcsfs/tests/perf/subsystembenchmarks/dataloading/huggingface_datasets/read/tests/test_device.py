@@ -12,6 +12,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("datasets")
 pytest.importorskip("pyarrow")
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import datagen  # noqa: E402
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.huggingface_datasets.parameters import (  # noqa: E402
     HFReadParameters,
@@ -59,7 +60,7 @@ def _params(manifest, **overrides):
 @pytest.fixture
 def sync_calls(monkeypatch):
     calls = []
-    monkeypatch.setattr(torch.cuda, "synchronize", calls.append)
+    monkeypatch.setattr(accelerator, "synchronize", calls.append)
     return calls
 
 
@@ -118,7 +119,7 @@ def test_run_epochs_on_cpu_neither_pins_nor_synchronizes(
     tmp_path, monkeypatch, sync_calls, loader_kwargs
 ):
     prefix, manifest = _ingest(tmp_path)
-    monkeypatch.setattr(_hf_read.device_lib.env, "detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
 
     _, rows, _, _ = _hf_read.run_epochs(
         prefix=prefix,
@@ -167,3 +168,62 @@ def test_run_epochs_delivers_batches_on_real_gpu(tmp_path):
 
     assert sum(len(b["label"]) for b in batches) == manifest["sample_count"]
     assert all(b["label"].device == device for b in batches)
+
+
+def test_tpu_single_rank_isolates_in_spawned_child(tmp_path, monkeypatch):
+    """split_by_node=False on TPU must not bind TPU in pytest parent."""
+    prefix, manifest = _ingest(tmp_path)
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    parent_binds = []
+    monkeypatch.setattr(
+        _hf_read.device_lib, "rank_device", lambda r: parent_binds.append(r)
+    )
+    spawned = []
+
+    def fake_spawn(rank_entry, pfx, params, *extra):
+        spawned.append(
+            (rank_entry, pfx, params.world_size, params.split_by_node, extra)
+        )
+        return ([0.1, 0.2], [manifest["sample_count"]] * 2, 0.05, 0.01)
+
+    monkeypatch.setattr(_hf_read, "spawn_rank_epochs", fake_spawn)
+    params = _params(manifest, split_by_node=False, world_size=4)
+    result = _hf_read.HFReadDriver().run_read(prefix, params, manifest)
+    assert parent_binds == []
+    assert spawned == [(_hf_read._rank_entry, prefix, 1, False, (False,))]
+    assert result.rows_per_epoch == [manifest["sample_count"]] * 2
+
+
+def test_run_rank_epochs_split_false_skips_node_split(
+    tmp_path, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    prefix, manifest = _ingest(tmp_path)
+
+    def no_split(*args):
+        raise AssertionError("split=False must not split by node")
+
+    monkeypatch.setattr(_hf_read, "_split", no_split)
+    per_epoch, _, _ = _hf_read.run_rank_epochs(
+        0, 2, prefix, _params(manifest, world_size=2), split=False
+    )
+
+    assert [rows for _, _, rows in per_epoch] == [manifest["sample_count"]] * 2
+
+
+def test_run_epochs_never_prepares_a_tpu_launch(
+    tmp_path, monkeypatch, sync_calls, ranks_on_fake_gpu, loader_kwargs
+):
+    prefix, _ = _ingest(tmp_path)
+    prepared = []
+    monkeypatch.setattr(accelerator, "prepare_launch", prepared.append)
+
+    _hf_read.run_epochs(
+        prefix=prefix,
+        fmt="pretok_parquet",
+        access="sequential",
+        num_workers=0,
+        batch_size=8,
+        rounds=1,
+    )
+
+    assert prepared == []

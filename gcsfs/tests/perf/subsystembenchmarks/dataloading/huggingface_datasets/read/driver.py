@@ -1,12 +1,14 @@
 """HuggingFace datasets streaming read driver for subsystem benchmarks.
 
-GPU delivery (pinning, non-blocking copies, per-round sync) comes from the
-shared ``dataloading.device`` module. ``with_format("torch", device=...)`` is
-not used because it would create CUDA tensors inside DataLoader workers.
+CPU/GPU/TPU batch delivery (pinning, non-blocking copies, per-round sync) comes
+from the shared ``dataloading.device`` module. ``with_format("torch", device=...)``
+is not used because it would create accelerator tensors inside DataLoader workers.
 """
 
+import dataclasses
 import time
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.dataloading import device as device_lib
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import (
     ReadResult,
@@ -100,7 +102,7 @@ def run_epochs(
         batch_size=batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
-        pin_memory=device is not None,
+        pin_memory=device_lib.pin_memory(device),
     )
     # Reseed shuffle buffer per epoch so workers iterate different orders.
     per_epoch, ttfb = measure_epochs(
@@ -120,8 +122,8 @@ def _split(ds, rank, world_size):
     return split_dataset_by_node(ds, rank=rank, world_size=world_size)
 
 
-def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
-    """Run persistent split DataLoader for a single rank across `rounds` epochs.
+def run_rank_epochs(rank, world_size, prefix, params, barrier=None, *, split=True):
+    """Run persistent DataLoader for a single rank across `rounds` epochs.
 
     Returns (per_epoch_timestamps, ttfb, build_seconds).
     """
@@ -137,14 +139,16 @@ def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
         shuffle_buffer_size=params.shuffle_buffer_size,
         max_buffer_input_shards=params.max_buffer_input_shards,
     )
-    ds = _split(ds, rank, world_size).with_format("torch")
+    if split:
+        ds = _split(ds, rank, world_size)
+    ds = ds.with_format("torch")
     build_seconds = time.perf_counter() - build_start
     loader = _build_loader(
         ds,
         batch_size=params.batch_size,
         num_workers=params.num_workers,
         prefetch_factor=params.prefetch_factor,
-        pin_memory=device is not None,
+        pin_memory=device_lib.pin_memory(device),
     )
     # Barrier absorbs dataset construction skew before round 1.
     per_epoch, ttfb = measure_epochs(
@@ -157,8 +161,8 @@ def run_rank_epochs(rank, world_size, prefix, params, barrier=None):
     return per_epoch, ttfb, build_seconds
 
 
-def _rank_entry(rank, world_size, prefix, params, barrier, queue):
-    queue.put(run_rank_epochs(rank, world_size, prefix, params, barrier))
+def _rank_entry(rank, world_size, prefix, params, barrier, queue, split=True):
+    queue.put(run_rank_epochs(rank, world_size, prefix, params, barrier, split=split))
 
 
 def run_split_epochs(prefix, params):
@@ -175,6 +179,11 @@ class HFReadDriver:
         del manifest  # HuggingFace reads full shards rather than a sample budget.
         if params.split_by_node:
             durations, rows_list, ttfb, build_seconds = run_split_epochs(prefix, params)
+        elif accelerator.device_kind() == "tpu":
+            # Isolate TPU device init inside a spawned child so pytest parent never locks libtpu.
+            durations, rows_list, ttfb, build_seconds = spawn_rank_epochs(
+                _rank_entry, prefix, dataclasses.replace(params, world_size=1), False
+            )
         else:
             durations, rows_list, ttfb, build_seconds = run_epochs(
                 prefix=prefix,

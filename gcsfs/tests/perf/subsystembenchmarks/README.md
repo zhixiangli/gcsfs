@@ -24,14 +24,15 @@ A group is a `<subsystem>/<implementation>` directory with its own
 | `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 | `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
-Data-loading groups detect CUDA automatically. On a GPU host, each round
-includes copying batches to the GPU. The exceptions are WebDataset with
-`decode: false` and Ray Data cases with feature columns, where there is nothing to copy.
-`checkpointing/pytorch_{save,load,reshard}` run on the device that `--device`
-resolves (default `auto`: CUDA when available, else CPU; these groups do not
-support TPU yet), using `gloo` on CPU and
-`cpu:gloo,cuda:nccl` on GPU; `checkpointing/pytorch_lightning` and
-`checkpointing/ray_pytorch` always run on CPU (`gloo`).
+Data-loading groups auto-detect their execution device (`--device=auto`, the
+default): CUDA GPU when CUDA is available, else TorchTPU when TPU hardware and
+`torch_tpu` are present, else CPU. Each round copies batches to the active GPU or
+TPU and synchronizes once (except WebDataset with `decode: false` and Ray Data
+cases with feature columns, which stay on the host).
+`checkpointing/pytorch_{save,load,reshard}` run on CPU (`gloo`) or CUDA GPU
+(`cpu:gloo,cuda:nccl`) as `--device` resolves (they do not support TPU yet);
+`checkpointing/pytorch_lightning`
+and `checkpointing/ray_pytorch` always run on CPU (`gloo`).
 
 - **Skip rules:** without `--nodes`, a case that needs more devices than the host
   has skips (`needs W devices; host has D`; CPU hosts allow up to 16 ranks).
@@ -201,7 +202,7 @@ For checkpointing groups:
 | `--filter` | none | pytest `-k` expression. |
 | `--cases` | none | Whitespace-separated exact case IDs to run; an unknown ID is an error. |
 | `--model-id` | from config | Checkpointing model override. |
-| `--device` | `auto` | `auto`, `cpu`, or `cuda`; execution device for `checkpointing/pytorch_{save,load,reshard}` (`auto` picks CUDA, else CPU). |
+| `--device` | `auto` | `auto`, `cpu`, `cuda`, or `tpu`; data loading supports all of them, `checkpointing/pytorch_{save,load,reshard}` support `cpu` and `cuda` (`auto` picks CUDA → TorchTPU → CPU). |
 | `--nodes` | unset | Node count (`>= 1`) in a multi-node job; selects only the cases that need exactly this many nodes (see the skip rules above; DCP cases need `ceil(max(world_size, source world_size) / devices_per_node)`). |
 | `--devices-per-node` | probed | Accelerators per node (`>= 1`) used for case sizing, and for listing off-cluster. |
 | `--list-node-counts` | off | Print the sorted JSON list of distinct node counts needed by enabled, non-skipped cases and exit 0. |
@@ -263,7 +264,7 @@ subsystembenchmarks/
 │   ├── bucket.py       # per-case bucket (also used by checkpointing)
 │   ├── amplification.py
 │   ├── datagen.py      # synthetic Parquet/JSONL corpus, optional feature columns
-│   ├── device.py       # GPU batch delivery
+│   ├── device.py       # CPU/GPU/TPU batch delivery
 │   ├── huggingface_datasets/
 │   ├── ray_data/
 │   └── webdataset/     # also gcsfs_opener.py, imagegen.py
