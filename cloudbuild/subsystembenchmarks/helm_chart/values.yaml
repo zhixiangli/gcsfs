@@ -1,0 +1,44 @@
+accelerator: gpu
+nodes: 1
+devicesPerNode: 8
+group: "dataloading/huggingface_datasets"
+filter: ""
+cases: ""
+sweepAxes: ""
+requirements: ""
+bucketPrefix: ""
+project: ""
+location: ""
+bucketType: "regional"
+zone: ""
+pinZone: false
+modelId: ""
+resultsUri: ""
+resultsBranch: ""
+runId: ""
+requireAmplification: false
+buildId: ""
+infraPrefix: ""
+gcsfsRepo: "https://github.com/fsspec/gcsfs.git"
+gcsfsCommit: "main"
+kueueQueue: ""
+
+image:
+  gpu: "nvcr.io/nvidia/pytorch:26.08-py3"
+  tpu: "us-docker.pkg.dev/ml-oss-artifacts-published/torch-tpu-public-release-container/torch-tpu:latest"
+
+gpu:
+  shmSize: "512Gi"
+  machineType: "a3-ultragpu-8g"
+
+tpu:
+  accelerator: "tpu7x"
+  chipsPerNode: 4
+  shmSize: "250Gi"
+  priority: "low"
+  durationMinutes: 180
+  machineType: "tpu7x-standard-4t"
+  multiNodePlacementPolicy: ""
+  topology:
+    "1": "2x2x1"
+    "2": "2x2x2"

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: subsystembenchmarks
+description: GCSFS subsystem benchmarks JobSet chart for GKE GPU and TPU clusters
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

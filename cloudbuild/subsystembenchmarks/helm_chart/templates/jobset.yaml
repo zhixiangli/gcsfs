@@ -1,0 +1,192 @@
+{{- include "ssb.validate" . -}}
+{{- $acc := toString .Values.accelerator -}}
+{{- $nodes := int .Values.nodes -}}
+{{- $buildId := include "ssb.buildId" . -}}
+{{- $pinZone := include "ssb.shouldPinZone" . -}}
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ .Release.Name | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  {{- if or (eq $acc "tpu") .Values.kueueQueue $buildId .Values.infraPrefix }}
+  labels:
+    {{- if .Values.kueueQueue }}
+    kueue.x-k8s.io/queue-name: {{ .Values.kueueQueue | quote }}
+    {{- end }}
+    {{- if eq $acc "tpu" }}
+    kueue.x-k8s.io/priority-class: {{ .Values.tpu.priority | quote }}
+    {{- end }}
+    {{- if $buildId }}
+    gcsfs-ssb/build-id: {{ $buildId | quote }}
+    {{- end }}
+    {{- if .Values.infraPrefix }}
+    gcsfs-ssb/infra-prefix: {{ .Values.infraPrefix | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  replicatedJobs:
+  - name: workload
+    replicas: 1
+    template:
+      spec:
+        parallelism: {{ $nodes }}
+        completions: {{ $nodes }}
+        backoffLimit: 0
+        completionMode: Indexed
+        ttlSecondsAfterFinished: 43200
+        template:
+          metadata:
+            {{- if or (eq $acc "tpu") $buildId .Values.infraPrefix }}
+            labels:
+              {{- if eq $acc "tpu" }}
+              declared-duration-minutes: {{ .Values.tpu.durationMinutes | toString | quote }}
+              {{- end }}
+              {{- if $buildId }}
+              gcsfs-ssb/build-id: {{ $buildId | quote }}
+              {{- end }}
+              {{- if .Values.infraPrefix }}
+              gcsfs-ssb/infra-prefix: {{ .Values.infraPrefix | quote }}
+              {{- end }}
+            {{- end }}
+            annotations:
+              kubectl.kubernetes.io/default-container: workload
+          spec:
+            serviceAccountName: default
+            {{- if eq $acc "gpu" }}
+            hostNetwork: false
+            {{- end }}
+            subdomain: {{ .Release.Name | quote }}
+            restartPolicy: Never
+            {{- if or (eq $acc "tpu") (and $pinZone .Values.zone) }}
+            nodeSelector:
+              {{- if eq $acc "tpu" }}
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator | quote }}
+              cloud.google.com/gke-tpu-topology: {{ include "ssb.tpuTopology" . | quote }}
+              {{- if and (gt $nodes 1) .Values.tpu.multiNodePlacementPolicy }}
+              cloud.google.com/placement-policy-name: {{ .Values.tpu.multiNodePlacementPolicy | quote }}
+              {{- end }}
+              {{- end }}
+              {{- if and $pinZone .Values.zone }}
+              topology.kubernetes.io/zone: {{ .Values.zone | quote }}
+              {{- end }}
+            {{- end }}
+            {{- if gt $nodes 1 }}
+            affinity:
+              podAntiAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      jobset.sigs.k8s.io/jobset-name: {{ .Release.Name | quote }}
+            {{- end }}
+            tolerations:
+            {{- if eq $acc "tpu" }}
+            - key: google.com/tpu
+              operator: Exists
+              effect: NoSchedule
+            {{- else }}
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+            - key: cloud.google.com/impending-node-termination
+              operator: Exists
+            - key: components.gke.io/gke-managed-components
+              operator: Exists
+            {{- end }}
+            volumes:
+            - name: launcher
+              configMap:
+                name: {{ printf "%s-launcher" .Release.Name | quote }}
+                defaultMode: 0755
+            - name: results
+              emptyDir: {}
+            - name: shared-memory
+              emptyDir:
+                medium: Memory
+                sizeLimit: {{ if eq $acc "gpu" }}{{ .Values.gpu.shmSize }}{{ else }}{{ .Values.tpu.shmSize }}{{ end }}
+            containers:
+            - name: workload
+              image: {{ include "ssb.image" . | quote }}
+              imagePullPolicy: IfNotPresent
+              env:
+              - name: GCSFS_SUBSYSTEM_ACCELERATOR
+                value: {{ $acc | quote }}
+              {{- if eq $acc "tpu" }}
+              - name: SSB_TPU_TOPOLOGY
+                value: {{ include "ssb.tpuTopology" . | quote }}
+              {{- end }}
+              - name: GCSFS_SUBSYSTEM_NODES
+                value: {{ $nodes | toString | quote }}
+              - name: GCSFS_SUBSYSTEM_DEVICES_PER_NODE
+                value: {{ .Values.devicesPerNode | toString | quote }}
+              - name: GCSFS_SUBSYSTEM_NODE_RANK
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+              - name: GCSFS_SUBSYSTEM_LEADER_ADDR
+                value: {{ include "ssb.leaderAddr" . | quote }}
+              - name: SSB_GROUP
+                value: {{ .Values.group | quote }}
+              - name: SSB_FILTER
+                value: {{ .Values.filter | quote }}
+              - name: SSB_CASES
+                value: {{ .Values.cases | quote }}
+              - name: SSB_SWEEP_AXES
+                value: {{ .Values.sweepAxes | quote }}
+              - name: SSB_REQUIREMENTS
+                value: {{ .Values.requirements | quote }}
+              - name: SSB_BUCKET_PREFIX
+                value: {{ .Values.bucketPrefix | quote }}
+              - name: SSB_PROJECT
+                value: {{ .Values.project | quote }}
+              - name: SSB_LOCATION
+                value: {{ .Values.location | quote }}
+              - name: SSB_BUCKET_TYPE
+                value: {{ .Values.bucketType | quote }}
+              - name: SSB_ZONE
+                value: {{ .Values.zone | quote }}
+              - name: SSB_MODEL_ID
+                value: {{ .Values.modelId | quote }}
+              - name: SSB_RESULTS_URI
+                value: {{ .Values.resultsUri | quote }}
+              - name: SSB_RESULTS_BRANCH
+                value: {{ .Values.resultsBranch | quote }}
+              - name: SSB_RUN_ID
+                value: {{ .Values.runId | quote }}
+              - name: SSB_REQUIRE_AMPLIFICATION
+                value: {{ if .Values.requireAmplification }}"1"{{ else }}"0"{{ end }}
+              - name: SSB_MACHINE_TYPE_DEFAULT
+                value: {{ include "ssb.machineTypeDefault" . | quote }}
+              - name: SSB_RELEASE_NAME
+                value: {{ .Release.Name | quote }}
+              - name: GCSFS_REPO
+                value: {{ .Values.gcsfsRepo | quote }}
+              - name: GCSFS_COMMIT
+                value: {{ .Values.gcsfsCommit | quote }}
+              command:
+              - bash
+              - -c
+              - |
+                trap "" SIGCONT
+                bash /etc/ssb-launcher/launcher.sh
+              resources:
+                {{- if eq $acc "tpu" }}
+                requests:
+                  google.com/tpu: {{ .Values.tpu.chipsPerNode }}
+                limits:
+                  google.com/tpu: {{ .Values.tpu.chipsPerNode }}
+                {{- else }}
+                requests:
+                  nvidia.com/gpu: {{ .Values.devicesPerNode }}
+                limits:
+                  nvidia.com/gpu: {{ .Values.devicesPerNode }}
+                {{- end }}
+              volumeMounts:
+              - name: launcher
+                mountPath: /etc/ssb-launcher
+              - name: results
+                mountPath: /results
+              - name: shared-memory
+                mountPath: /dev/shm
