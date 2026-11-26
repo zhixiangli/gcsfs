@@ -9,6 +9,7 @@ from lightning.pytorch.trainer.call import _call_configure_model
 from lightning.pytorch.trainer.states import TrainerFn
 from torch.utils.data import DataLoader
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
     MAX_RANKS,
     run_split,
@@ -18,11 +19,15 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
     CheckpointDriver,
     CheckpointResult,
 )
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import (
+    stage_gcs_model,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch_lightning.common import (
     DummyDataset,
     DummyModel,
     get_strategy,
     is_distributed_strategy,
+    trainer_device_args,
 )
 
 
@@ -57,11 +62,11 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
 
     trainer_args = {
         "default_root_dir": prefix,
-        "accelerator": "cpu",
-        "devices": world_size,
+        **trainer_device_args(world_size),
         "max_steps": 1,
         "precision": "bf16-mixed",
         "enable_checkpointing": False,
+        "logger": False,
     }
 
     setup_checkpoint_for_load(prefix, params, trainer_args, is_distributed=True)
@@ -73,11 +78,11 @@ def _rank_setup_checkpoint(rank, world_size, port, prefix, params, q):
 def _setup_read_trainer(prefix, params, world_size=1, strategy=None):
     trainer_args = {
         "default_root_dir": prefix,
-        "accelerator": "cpu",
-        "devices": world_size,
+        **trainer_device_args(world_size),
         "max_steps": 1,
         "precision": "bf16-mixed",
         "enable_checkpointing": False,
+        "logger": False,
     }
     if strategy is not None:
         trainer_args["strategy"] = strategy
@@ -92,6 +97,8 @@ def _setup_read_trainer(prefix, params, world_size=1, strategy=None):
     _call_configure_model(trainer)
     if trainer.strategy.restore_checkpoint_after_setup:
         trainer.strategy.setup(trainer)
+    else:
+        trainer.strategy.model_to_device()
 
     return trainer
 
@@ -101,8 +108,7 @@ def _load_step(trainer, ckpt_path):
 
 
 def _rank_load(rank, world_size, port, prefix, params, q):
-    # This runs in a subprocess. We use "gloo" for CPU distributed run.
-    setup_distributed_env(rank, world_size, port)
+    device = setup_distributed_env(rank, world_size, port)
 
     # The checkpoint path is deterministic based on ModelCheckpoint config
     ckpt_path = os.path.join(prefix, "model.ckpt")
@@ -115,6 +121,7 @@ def _rank_load(rank, world_size, port, prefix, params, q):
         dist.barrier()
         t_start = time.perf_counter()
         _load_step(trainer, ckpt_path)
+        accelerator.synchronize(device)
         dist.barrier()
         t_end = time.perf_counter()
         durations.append((t_start, t_end))
@@ -125,6 +132,7 @@ def _rank_load(rank, world_size, port, prefix, params, q):
 
 class PLCheckpointReadDriver(CheckpointDriver):
     def setup(self, prefix, params):
+        stage_gcs_model(getattr(params, "model_id", ""))
         if is_distributed_strategy(params.strategy):
             setup_world_size = (
                 getattr(params, "setup_world_size", None) or params.world_size
@@ -138,21 +146,23 @@ class PLCheckpointReadDriver(CheckpointDriver):
         else:
             trainer_args = {
                 "default_root_dir": prefix,
-                "accelerator": "cpu",
-                "devices": 1,
+                **trainer_device_args(1),
                 "max_steps": 1,
                 "precision": "bf16-mixed",
                 "enable_checkpointing": False,
+                "logger": False,
             }
             setup_checkpoint_for_load(
                 prefix, params, trainer_args, is_distributed=False
             )
 
     def run(self, prefix, params):
+        stage_gcs_model(getattr(params, "model_id", ""))
         if is_distributed_strategy(params.strategy):
             durations = run_split(prefix, params, _rank_load)
             return CheckpointResult(durations=durations)
 
+        device = accelerator.bind_rank(0)
         ckpt_path = os.path.join(prefix, "model.ckpt")
         trainer = _setup_read_trainer(prefix, params, world_size=1)
 
@@ -160,6 +170,7 @@ class PLCheckpointReadDriver(CheckpointDriver):
         for _ in range(params.rounds):
             begin = time.perf_counter()
             _load_step(trainer, ckpt_path)
+            accelerator.synchronize(device)
             end = time.perf_counter()
             durations.append(end - begin)
 
@@ -167,5 +178,7 @@ class PLCheckpointReadDriver(CheckpointDriver):
 
     def read_count(self, params) -> int:
         if params.strategy in ("ddp", "fsdp_full", "model_parallel_full"):
-            return min(params.world_size, MAX_RANKS)
+            if accelerator.device_kind() == "cpu":
+                return min(params.world_size, MAX_RANKS)
+            return params.world_size
         return 1

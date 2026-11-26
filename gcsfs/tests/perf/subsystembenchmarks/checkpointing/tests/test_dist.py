@@ -230,62 +230,6 @@ def test_spawned_ranks_join_terminates_on_error():
     fake_mgr.shutdown.assert_called_once_with()
 
 
-def test_terminate_escalates_to_kill_and_tolerates_missing_processes():
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import _terminate
-
-    _terminate(None)
-    _terminate(_FakeContext())
-    null_procs = MagicMock()
-    null_procs.processes = None
-    _terminate(null_procs)
-
-    stubborn = MagicMock()
-    stubborn.is_alive.return_value = True
-    clean = MagicMock()
-    clean.is_alive.return_value = False
-    ctx = MagicMock()
-    ctx.processes = [stubborn, clean]
-
-    _terminate(ctx, grace_s=0.25)
-
-    stubborn.terminate.assert_called_once_with()
-    stubborn.kill.assert_called_once_with()
-    assert len(stubborn.join.call_args_list) == 2
-    for call in stubborn.join.call_args_list:
-        assert 0.0 <= call.args[0] <= 0.25
-
-    clean.terminate.assert_called_once_with()
-    clean.join.assert_called_once()
-    assert 0.0 <= clean.join.call_args.args[0] <= 0.25
-    clean.kill.assert_not_called()
-
-
-def test_terminate_shares_grace_budget_across_cohort(monkeypatch):
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing import _dist
-
-    now = [100.0]
-    monkeypatch.setattr(_dist.time, "monotonic", lambda: now[0])
-
-    def _make_stubborn():
-        p = MagicMock()
-        p.is_alive.return_value = True
-        p.join.side_effect = lambda timeout=None: now.__setitem__(
-            0, now[0] + (timeout or 0.0)
-        )
-        return p
-
-    ctx = MagicMock()
-    ctx.processes = [_make_stubborn() for _ in range(4)]
-
-    _dist._terminate(ctx, grace_s=10.0)
-
-    # 10s shared across SIGTERM joins + 10s shared across SIGKILL joins (not 4 * 20s = 80s).
-    assert now[0] - 100.0 == pytest.approx(20.0)
-    for proc in ctx.processes:
-        proc.terminate.assert_called_once_with()
-        proc.kill.assert_called_once_with()
-
-
 def test_spawned_ranks_close_is_idempotent_and_safe_after_join():
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import SpawnedRanks
 
@@ -330,19 +274,23 @@ def test_spawned_ranks_close_is_idempotent_and_safe_after_join():
     manager3.shutdown.assert_called_once_with()
 
 
-def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
+def test_setup_distributed_env_binds_before_init(monkeypatch):
     import os
 
     import torch
     import torch.distributed as dist
 
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
     from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
         setup_distributed_env,
     )
 
     events = []
     monkeypatch.setattr(
-        torch.cuda, "set_device", lambda idx: events.append(("set_device", idx))
+        accelerator,
+        "bind_rank",
+        lambda local_rank, **kw: events.append(("bind_rank", local_rank, kw))
+        or torch.device("cpu"),
     )
     monkeypatch.setattr(
         dist,
@@ -355,24 +303,131 @@ def test_setup_distributed_env_cpu_and_cuda(monkeypatch):
         "MASTER_ADDR",
         "MASTER_PORT",
         "GLOO_SOCKET_IFNAME",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_SOCKET_FAMILY",
         "WORLD_SIZE",
         "RANK",
         "LOCAL_RANK",
     ):
         monkeypatch.delenv(key, raising=False)
 
-    setup_distributed_env(1, 4, 29500)
-    assert events == [("init_pg", "gloo", 1, 4)]
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cpu")
+    dev = setup_distributed_env(1, 4, 29500)
+    assert dev == torch.device("cpu")
+    assert events == [
+        ("bind_rank", 1, {"global_rank": 1, "world_size": 4}),
+        ("init_pg", "gloo", 1, 4),
+    ]
     assert os.environ["RANK"] == "1"
+    assert os.environ["LOCAL_RANK"] == "1"
     assert os.environ["WORLD_SIZE"] == "4"
+    assert os.environ["MASTER_ADDR"] == "localhost"
     assert os.environ["MASTER_PORT"] == "29500"
+    assert os.environ["GLOO_SOCKET_IFNAME"] == "lo"
 
     events.clear()
-    setup_distributed_env(2, 8, 29501, device="cuda")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("MASTER_ADDR", "pod-0.svc.default")
+    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cuda")
+    monkeypatch.setattr(
+        accelerator,
+        "bind_rank",
+        lambda local_rank, **kw: events.append(("bind_rank", local_rank, kw))
+        or torch.device("cuda", local_rank),
+    )
+    dev_cuda = setup_distributed_env(8, 16, 29501)
+    assert dev_cuda == torch.device("cuda", 0)
     assert events == [
-        ("set_device", 2),
-        ("init_pg", "cpu:gloo,cuda:nccl", 2, 8),
+        ("bind_rank", 0, {"global_rank": 8, "world_size": 16}),
+        ("init_pg", "cpu:gloo,cuda:nccl", 8, 16),
     ]
+    assert os.environ["MASTER_ADDR"] == "pod-0.svc.default"
+    assert os.environ.get("GLOO_SOCKET_IFNAME") != "lo"
+    assert os.environ["NCCL_SOCKET_FAMILY"] == "AF_INET"
+
+
+def test_setup_distributed_env_uses_gloo_for_single_rank_tpu(monkeypatch):
+    import torch
+    import torch.distributed as dist
+
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+        setup_distributed_env,
+    )
+
+    events = []
+    for key in (
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "GLOO_SOCKET_IFNAME",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_SOCKET_FAMILY",
+        "WORLD_SIZE",
+        "RANK",
+        "LOCAL_RANK",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    monkeypatch.setattr(
+        accelerator,
+        "bind_rank",
+        lambda local_rank, **kw: events.append(("bind_rank", local_rank, kw))
+        or torch.device("meta"),
+    )
+    monkeypatch.setattr(
+        dist,
+        "init_process_group",
+        lambda backend, rank, world_size: events.append(
+            ("init_pg", backend, rank, world_size)
+        ),
+    )
+
+    dev = setup_distributed_env(0, 1, 29510)
+    assert dev == torch.device("meta")
+    assert events == [
+        ("bind_rank", 0, {"global_rank": 0, "world_size": 1}),
+        ("init_pg", "gloo", 0, 1),
+    ]
+
+    # Multi-rank TPU still uses tpu_dist.
+    events.clear()
+    setup_distributed_env(0, 8, 29511)
+    assert events == [
+        ("bind_rank", 0, {"global_rank": 0, "world_size": 8}),
+        ("init_pg", "tpu_dist", 0, 8),
+    ]
+
+
+def test_spawn_split_rejects_world_wider_than_host_on_accelerator(monkeypatch):
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "cuda")
+    monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
+    with pytest.raises(ValueError, match="world_size 16 exceeds 8 devices"):
+        spawn_split("gs://b/ckpt/", _params(16), lambda *a: None)
+
+
+def test_spawn_split_prepares_launch(monkeypatch, fake_spawn):
+    from gcsfs.tests.perf.subsystembenchmarks._common import accelerator
+
+    events = []
+    monkeypatch.setattr(accelerator, "device_kind", lambda: "tpu")
+    monkeypatch.setattr(accelerator, "local_device_count", lambda: 8)
+    monkeypatch.setattr(
+        accelerator, "prepare_launch", lambda ws: events.append(("prepare", ws))
+    )
+    orig_spawn = __import__("torch.multiprocessing", fromlist=["spawn"]).spawn
+
+    def recording_spawn(*a, **kw):
+        events.append(("spawn", kw.get("nprocs")))
+        return orig_spawn(*a, **kw)
+
+    monkeypatch.setattr("torch.multiprocessing.spawn", recording_spawn)
+    ranks = spawn_split("gs://b/ckpt/", _params(4), lambda *a: None)
+    ranks.join()
+    assert events == [("prepare", 4), ("spawn", 4)]
 
 
 def _shared_tensor_rank(rank, world_size, port, prefix, params, q, *, tensors):

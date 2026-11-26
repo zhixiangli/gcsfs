@@ -18,8 +18,10 @@ pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM  # noqa: E402
 
 import gcsfs  # noqa: E402
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
+from gcsfs.tests.perf.subsystembenchmarks._common.spawn import (  # noqa: E402
     MIN_OPEN_FILES,
+)
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (  # noqa: E402
     run_split,
     setup_distributed_env,
 )

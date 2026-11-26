@@ -1,23 +1,18 @@
+import contextlib
+import functools
 import os
 import socket
-import time
+import sys
+
+from gcsfs.tests.perf.subsystembenchmarks._common import (
+    accelerator,
+    nodes,
+    placement,
+    spawn,
+)
 
 # Cap on spawned ranks to prevent OOM on test-c4-highmem.
-MAX_RANKS = 16
-MIN_OPEN_FILES = 65536
-
-
-def _ensure_open_file_limit(min_nofile: int = MIN_OPEN_FILES) -> None:
-    """Raises soft RLIMIT_NOFILE toward hard limit for multi-rank shared-tensor spawns."""
-    import resource
-
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    target = min_nofile if hard == resource.RLIM_INFINITY else min(hard, min_nofile)
-    if soft < target:
-        try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
-        except (OSError, ValueError):
-            pass
+MAX_RANKS = accelerator.CPU_MAX_RANKS
 
 
 # Concurrent benchmark processes on one VM (cloudbuild/subsystembenchmarks/scripts/run-ci.sh)
@@ -64,33 +59,6 @@ def run_split(prefix, params, target_fn, world_size_override=None) -> list[float
     return ranks.durations
 
 
-def _terminate(context, grace_s: float = 10.0) -> None:
-    """Terminates worker processes on ``context``, escalating to SIGKILL."""
-    procs = []
-    for proc in getattr(context, "processes", None) or ():
-        try:
-            proc.terminate()
-        except (OSError, ValueError):
-            continue
-        procs.append(proc)
-    deadline = time.monotonic() + grace_s
-    for proc in procs:
-        proc.join(max(0.0, deadline - time.monotonic()))
-
-    survivors = []
-    for proc in procs:
-        if proc.is_alive():
-            try:
-                proc.kill()
-            except (OSError, ValueError):
-                continue
-            survivors.append(proc)
-    if survivors:
-        kill_deadline = time.monotonic() + grace_s
-        for proc in survivors:
-            proc.join(max(0.0, kill_deadline - time.monotonic()))
-
-
 class SpawnedRanks:
     """Ranks spawned by spawn_split.
 
@@ -101,78 +69,236 @@ class SpawnedRanks:
     the SyncManager idempotently.
     """
 
-    def __init__(self, durations, context, manager):
+    def __init__(
+        self,
+        durations,
+        context,
+        manager,
+        *,
+        channel=None,
+        sync_key: str | None = None,
+    ):
         self.durations = durations
+        self.sync_key = sync_key
         self._context = context
         self._manager = manager
+        self._channel = channel
+        self._join_key = f"{sync_key}/joined" if sync_key else None
+        self._scope = nodes.NodeChannel._scope(sync_key) if sync_key else None
         self._closed = False
+
+    def allgather_stats(self, local_stats: list) -> list:
+        """Allgather per-rank stats across nodes when running multi-node."""
+        if self._channel is not None and self.sync_key is not None:
+            return self._channel.allgather(f"{self.sync_key}/stats", local_stats)
+        return local_stats
+
+    def _signal_failure(self, exc: BaseException) -> None:
+        if (
+            self._channel is not None
+            and self._scope is not None
+            and not isinstance(exc, nodes.PeerFailed)
+        ):
+            with contextlib.suppress(Exception):
+                self._channel.fail(self._scope, repr(exc))
 
     def join(self) -> None:
         if self._closed:
             return
         try:
-            while not self._context.join():
-                pass
-        except BaseException:
-            _terminate(self._context)
+            if self._context is not None:
+                while not self._context.join(timeout=1.0 if self._channel else None):
+                    if self._channel is not None and self._scope is not None:
+                        self._channel.check_failed(self._scope)
+        except BaseException as exc:
+            spawn.terminate(self._context)
+            self._signal_failure(exc)
             raise
         finally:
             self._closed = True
-            self._manager.shutdown()
+            if self._manager is not None:
+                self._manager.shutdown()
+        if self._channel is not None and self._join_key is not None:
+            self._channel.barrier(self._join_key)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            _terminate(self._context)
+            spawn.terminate(self._context)
         finally:
-            self._manager.shutdown()
+            if self._manager is not None:
+                self._manager.shutdown()
+        if self._channel is not None and self._join_key is not None:
+            active_exc = sys.exc_info()[1]
+            if active_exc is not None:
+                self._signal_failure(active_exc)
+            else:
+                self._channel.barrier(self._join_key)
+
+
+def _multinode_rank_wrapper(
+    local_rank,
+    node_rank,
+    per_node,
+    leader_addr,
+    target_fn,
+    world_size,
+    port,
+    prefix,
+    params,
+    q,
+):
+    global_rank = node_rank * per_node + local_rank
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["MASTER_ADDR"] = leader_addr
+    target_fn(global_rank, world_size, port, prefix, params, q)
+
+
+def _normalize_local_results(local_results, rounds: int):
+    """Rebase per-node perf_counter pairs to the node's earliest round begin.
+
+    Different hosts have unrelated monotonic-clock epochs, so raw timestamps
+    cannot be compared across nodes. Every timed round is bracketed by
+    ``dist.barrier()``, so rebasing each node's round timestamps by that node's
+    earliest start preserves intra-node skew while remaining epoch-invariant.
+    """
+    if not local_results or all(r is None for r in local_results):
+        return local_results
+    normalized = [[] for _ in local_results]
+    for r in range(rounds):
+        min_begin = min(res[r][0] for res in local_results)
+        for i, res in enumerate(local_results):
+            normalized[i].append([res[r][0] - min_begin, res[r][1] - min_begin])
+    return normalized
+
+
+def local_nprocs_for_world_size(
+    world_size: int, node_group: nodes.NodeGroup | None = None
+) -> int:
+    """Return how many local ranks this node spawns for ``world_size``."""
+    if node_group is None:
+        if accelerator.device_kind() == "cpu":
+            return min(world_size, MAX_RANKS)
+        return world_size
+    per_node = placement.devices_per_node()
+    if world_size <= per_node:
+        return world_size if node_group.is_leader else 0
+    if world_size % per_node != 0:
+        raise ValueError(
+            f"world_size {world_size} must be a multiple of "
+            f"devices_per_node {per_node} for multi-node runs"
+        )
+    active_nodes = world_size // per_node
+    if active_nodes > node_group.num_nodes:
+        raise ValueError(
+            f"world_size {world_size} needs {active_nodes} nodes; "
+            f"job has {node_group.num_nodes}"
+        )
+    return per_node if node_group.node_rank < active_nodes else 0
+
+
+def _spawn_split_multinode(
+    ch, prefix, params, target_fn, world_size_override=None
+) -> SpawnedRanks:
+    case_name = getattr(params, "name", "case")
+    key = ch.next_key(case_name)
+    world_size = (
+        world_size_override if world_size_override is not None else params.world_size
+    )
+    per_node = placement.devices_per_node()
+    local_nprocs = local_nprocs_for_world_size(world_size, ch.group)
+
+    if local_nprocs > 0 and accelerator.device_kind() != "cpu":
+        local_devices = accelerator.local_device_count()
+        if local_nprocs > local_devices:
+            raise ValueError(
+                f"local ranks {local_nprocs} exceeds {local_devices} devices"
+            )
+
+    manager = None
+    context = None
+    try:
+        if ch.group.is_leader:
+            port = find_free_port()
+            ch.publish(f"{key}/port", str(port))
+        else:
+            port = int(ch.get(f"{key}/port"))
+
+        local_results = []
+        if local_nprocs > 0:
+            local_results, context, manager = spawn.spawn_local_ranks(
+                _multinode_rank_wrapper,
+                lambda q: (
+                    ch.group.node_rank,
+                    per_node,
+                    ch.group.leader_addr,
+                    target_fn,
+                    world_size,
+                    port,
+                    prefix,
+                    params,
+                    q,
+                ),
+                local_nprocs,
+                world_size=world_size,
+                channel=ch,
+                scope=case_name,
+            )
+
+        normalized = _normalize_local_results(local_results, params.rounds)
+        all_results = ch.allgather(f"{key}/results", normalized)
+    except BaseException as exc:
+        try:
+            spawn.terminate(context)
+        finally:
+            if manager is not None:
+                manager.shutdown()
+        if not isinstance(exc, nodes.PeerFailed):
+            with contextlib.suppress(Exception):
+                ch.fail(case_name, repr(exc))
+        raise
+
+    return SpawnedRanks(
+        reduce_durations(all_results, world_size, params.rounds),
+        context,
+        manager,
+        channel=ch,
+        sync_key=key,
+    )
 
 
 def spawn_split(prefix, params, target_fn, world_size_override=None) -> SpawnedRanks:
     """Spawns the ranks and returns once every rank has put its result."""
-    import queue
-
-    import torch.multiprocessing as mp
-
-    _ensure_open_file_limit()
-    ctx = mp.get_context("spawn")
-    world_size = params.world_size
-    if world_size_override is not None:
-        world_size = world_size_override
-    world_size = min(world_size, MAX_RANKS)
-    port = find_free_port()
-
-    manager = ctx.Manager()
-    context = None
-    try:
-        q = manager.Queue()
-        context = mp.spawn(
-            target_fn,
-            args=(world_size, port, prefix, params, q),
-            nprocs=world_size,
-            join=False,
+    ch = nodes.channel()
+    if ch is not None:
+        return _spawn_split_multinode(
+            ch, prefix, params, target_fn, world_size_override
         )
-        results = []
-        while len(results) < world_size:
-            try:
-                results.append(q.get(timeout=1))
-            except queue.Empty:
-                # Raises if a rank died before reporting.
-                if context.join(timeout=0):
-                    raise RuntimeError("ranks exited without reporting results")
-    except BaseException:
-        try:
-            _terminate(context)
-        finally:
-            manager.shutdown()
-        raise
 
-    return SpawnedRanks(_reduce(results, world_size, params.rounds), context, manager)
+    world_size = (
+        world_size_override if world_size_override is not None else params.world_size
+    )
+    if accelerator.device_kind() == "cpu":
+        world_size = min(world_size, MAX_RANKS)
+    else:
+        local_devices = accelerator.local_device_count()
+        if world_size > local_devices:
+            raise ValueError(f"world_size {world_size} exceeds {local_devices} devices")
+    port = find_free_port()
+    results, context, manager = spawn.spawn_local_ranks(
+        target_fn,
+        lambda q: (world_size, port, prefix, params, q),
+        world_size,
+        world_size=world_size,
+    )
+    return SpawnedRanks(
+        reduce_durations(results, world_size, params.rounds), context, manager
+    )
 
 
-def _reduce(results, world_size, rounds) -> list[float]:
+def reduce_durations(results, world_size, rounds) -> list[float]:
     if all(r is None for r in results):
         return []
 
@@ -185,25 +311,50 @@ def _reduce(results, world_size, rounds) -> list[float]:
     return durations
 
 
-def setup_distributed_env(
-    rank: int, world_size: int, port: int, device: str = "cpu"
-) -> None:
-    """Initializes the distributed environment for a multiprocess worker."""
-    import torch
+_reduce = reduce_durations
+
+
+_LOCAL_MASTER_ADDRS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+@functools.lru_cache(maxsize=1)
+def _default_ipv4_interface() -> str | None:
+    """Return the interface carrying the default IPv4 route, or ``eth0`` if present."""
+    try:
+        with open("/proc/net/route") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "00000000" and parts[0] != "lo":
+                    return parts[0]
+    except OSError:
+        pass
+    if os.path.isdir("/sys/class/net/eth0"):
+        return "eth0"
+    return None
+
+
+def setup_distributed_env(rank: int, world_size: int, port: int):
+    """Bind this rank's accelerator and initialize the distributed process group."""
     import torch.distributed as dist
 
-    from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.device import (
-        backend_for,
-    )
-
-    backend = backend_for(device)
-    os.environ["MASTER_ADDR"] = "localhost"
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    master_addr = os.environ.get("MASTER_ADDR") or "localhost"
+    os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(port)
-    os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+    if master_addr in _LOCAL_MASTER_ADDRS:
+        os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+    else:
+        iface = _default_ipv4_interface()
+        if iface:
+            os.environ.setdefault("GLOO_SOCKET_IFNAME", iface)
+            os.environ.setdefault("NCCL_SOCKET_IFNAME", iface)
+        os.environ.setdefault("NCCL_SOCKET_FAMILY", "AF_INET")
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["RANK"] = str(rank)
-    os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
 
-    if device == "cuda":
-        torch.cuda.set_device(rank)
+    device = accelerator.bind_rank(local_rank, global_rank=rank, world_size=world_size)
+    backend = accelerator.process_group_backend(world_size)
     dist.init_process_group(backend, rank=rank, world_size=world_size)
+    return device

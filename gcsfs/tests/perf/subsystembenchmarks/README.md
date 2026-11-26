@@ -24,20 +24,27 @@ A group is a `<subsystem>/<implementation>` directory with its own
 | `checkpointing/pytorch_lightning` | PyTorch Lightning | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 | `checkpointing/ray_pytorch` | Ray actors with PyTorch `torch.save` / DCP | Checkpoint write and read of Llama-3.1-8B with AdamW state |
 
-Data-loading groups auto-detect their execution device (`--device=auto`, the
-default): CUDA GPU when CUDA is available, else TorchTPU when TPU hardware and
-`torch_tpu` are present, else CPU. Each round copies batches to the active GPU or
-TPU and synchronizes once (except WebDataset with `decode: false` and Ray Data
-cases with feature columns, which stay on the host).
-`checkpointing/pytorch_{save,load,reshard}` run on CPU (`gloo`) or CUDA GPU
-(`cpu:gloo,cuda:nccl`) as `--device` resolves (they do not support TPU yet);
-`checkpointing/pytorch_lightning`
-and `checkpointing/ray_pytorch` always run on CPU (`gloo`).
+Every group auto-detects its execution device (`--device=auto`, the default):
+CUDA GPU (`cpu:gloo,cuda:nccl`) when CUDA is available, else TorchTPU
+(`tpu_dist`) when TPU hardware and `torch_tpu` are present, else CPU (`gloo`).
+Pass `--device=cpu`, `--device=cuda`, or `--device=tpu` to override detection; an
+explicit device that the host cannot satisfy fails fast rather than falling back
+silently.
 
+- **Data loading** copies batches to the active GPU or TPU and synchronizes once
+  per round (except WebDataset with `decode: false` and Ray Data cases with
+  feature columns, which stay on the host).
+- **Checkpointing** places models, optimizer states, and meshes on the active
+  accelerator and synchronizes before each round's end timestamp. Cases whose
+  `world_size` exceeds one node (such as the 16-rank DCP cases on 8-device
+  nodes) run SPMD across `ceil(world_size / devices_per_node)` nodes when
+  launched with `--nodes`.
 - **Skip rules:** without `--nodes`, a case that needs more devices than the host
   has skips (`needs W devices; host has D`; CPU hosts allow up to 16 ranks).
   Ranks own one device each, except data loading on GPU, where ranks share GPUs
-  and any host with a GPU runs every case. Known
+  and any host with a GPU runs every case. Only
+  `checkpointing/pytorch_{save,load,reshard}` cases span nodes; every other case
+  needs one node. Known
   framework limitations on a specific accelerator are declared explicitly in
   `_common/limitations.py` and documented with repros in
   [`limitations.md`](limitations.md) (for example, `checkpointing/pytorch_lightning`
@@ -169,15 +176,11 @@ For checkpointing groups:
 - The default model is `gs://huggingface-model-weights/Llama-3.1-8B` (or
   `gs://gcs-aiml-huggingface-model-weights/Llama-3.1-8B` for
   `checkpointing/pytorch_{save,load,reshard}`).
-- A `gs://.../<name>` model is staged under `/tmp/<name>` (with
-  `*.safetensors` weights). `checkpointing/pytorch_{save,load,reshard}`
-  download a `gs://.../<name>` model into `/tmp/<name>` during `setup()` if
-  safetensors are missing; `checkpointing/pytorch_lightning` and
-  `checkpointing/ray_pytorch` require copying it there beforehand:
-
-  ```bash
-  gcloud storage cp -r gs://huggingface-model-weights/Llama-3.1-8B /tmp/
-  ```
+- A `gs://.../<name>` model is staged lazily under `/tmp/<name>` (with
+  `*.safetensors` weights) via `gcsfs` during driver `setup()` if not already
+  present locally, across all checkpointing groups (`pytorch_{save,load,reshard}`,
+  `pytorch_lightning`, and `ray_pytorch`). You may also pre-populate `/tmp/<name>`
+  manually to reuse weights across runs.
 
 - For `checkpointing/pytorch_{save,load,reshard}`, `--model-id` accepts a
   `gs://` URI or a local directory containing `*.safetensors`;
@@ -185,8 +188,10 @@ For checkpointing groups:
   a Hugging Face repo ID. Variants that pin their own `model_id` (the OLMoE
   rows in `checkpointing/pytorch_{save,load,reshard}`) are skipped while
   `--model-id` is set, so the override runs exactly the model you asked for.
-- On a CUDA host, `checkpointing/pytorch_{save,load,reshard}` rank capacity
-  equals `torch.cuda.device_count()`, so `ws16` rows skip on an 8-GPU host.
+- On GPU and TPU hosts, rank capacity equals the node's local device count (8 on
+  H200 and TPU7x nodes). Without `--nodes`, 16-rank cases skip on an 8-device
+  host; with `--nodes=2` and the multi-node JobSet environment, they run SPMD
+  across two nodes.
 - These groups need a very large-memory host. A code comment in
   `checkpointing/checkpoint_case.py` targets a 732 GB VM.
 
@@ -202,7 +207,7 @@ For checkpointing groups:
 | `--filter` | none | pytest `-k` expression. |
 | `--cases` | none | Whitespace-separated exact case IDs to run; an unknown ID is an error. |
 | `--model-id` | from config | Checkpointing model override. |
-| `--device` | `auto` | `auto`, `cpu`, `cuda`, or `tpu`; data loading supports all of them, `checkpointing/pytorch_{save,load,reshard}` support `cpu` and `cuda` (`auto` picks CUDA → TorchTPU → CPU). |
+| `--device` | `auto` | `auto`, `cpu`, `cuda`, or `tpu`; applies to every group (`auto` picks CUDA → TorchTPU → CPU). |
 | `--nodes` | unset | Node count (`>= 1`) in a multi-node job; selects only the cases that need exactly this many nodes (see the skip rules above; DCP cases need `ceil(max(world_size, source world_size) / devices_per_node)`). |
 | `--devices-per-node` | probed | Accelerators per node (`>= 1`) used for case sizing, and for listing off-cluster. |
 | `--list-node-counts` | off | Print the sorted JSON list of distinct node counts needed by enabled, non-skipped cases and exit 0. |
@@ -269,17 +274,17 @@ subsystembenchmarks/
 │   ├── ray_data/
 │   └── webdataset/     # also gcsfs_opener.py, imagegen.py
 ├── checkpointing/
-│   ├── checkpoint_case.py  # shared write/read case lifecycle
+│   ├── checkpoint_case.py  # shared write/read case lifecycle (single- and multi-node)
 │   ├── driver.py           # checkpoint-driver interface
 │   ├── configurator.py     # config loading for checkpoint groups
-│   ├── _dist.py            # shared gloo/nccl spawn and round reduction
+│   ├── _dist.py            # shared gloo/nccl/tpu_dist spawn, multi-node SPMD, round reduction
 │   ├── _llama_tp.py        # shared LLaMA tensor-parallel plan
-│   ├── pytorch/            # shared DCP library (device, layout, model, parallelize, planners, reference, state, read/, write/)
+│   ├── pytorch/            # shared DCP library (layout, model, parallelize, planners, reference, state, read/, write/)
 │   ├── pytorch_save/       # runnable DCP save group
 │   ├── pytorch_load/       # runnable same-layout DCP load group
 │   ├── pytorch_reshard/    # runnable cross-layout DCP reshard group
-│   ├── pytorch_lightning/  # also common.py
-│   └── ray_pytorch/        # also common.py
+│   ├── pytorch_lightning/  # also common.py (CPU/GPU; skipped on TPU)
+│   └── ray_pytorch/        # also common.py (CPU/GPU/TPU)
 └── tests/
 ```
 

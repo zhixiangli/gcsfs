@@ -3,13 +3,17 @@ import functools
 import fsspec
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader, FsspecWriter
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import run_split
+from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    local_nprocs_for_world_size,
+    run_split,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointResult
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
     DCPDriver,
     build_state,
+    import_fsspec_filesystem,
     rank_session,
     spawn_with_stats,
     timed,
@@ -31,6 +35,8 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     assert_loaded_state,
     expected_bytes_requested,
 )
+
+FsspecReader, FsspecWriter = import_fsspec_filesystem()
 
 
 def _step_prefix(prefix: str, step: int) -> str:
@@ -91,9 +97,12 @@ class PyTorchCheckpointWriteDriver(DCPDriver):
         self.prepare(params, params.target_layout())
 
     def run(self, prefix, params):
-        weights = load_weights(params.model_id)
+        world_size = params.target_layout().world_size
+        local_nprocs = local_nprocs_for_world_size(
+            world_size, nodes.NodeGroup.from_env()
+        )
+        weights = load_weights(params.model_id) if local_nprocs > 0 else {}
         try:
-            world_size = params.target_layout().world_size
             ranks, stats = spawn_with_stats(
                 prefix, params, _rank_save, world_size, weights
             )

@@ -701,3 +701,134 @@ def test_setup_process_tree_is_reaped_when_interrupted(tmp_path, monkeypatch):
             if pfile.exists():
                 with contextlib.suppress(ProcessLookupError, ValueError):
                     os.kill(int(pfile.read_text()), signal.SIGKILL)
+
+
+class _MultiNodeFakeDriver(CheckpointDriver):
+    def __init__(self, log_path: str):
+        self.log_path = log_path
+
+    def _log(self, event: str) -> None:
+        with open(self.log_path, "a") as f:
+            f.write(f"{event}\n")
+
+    def setup(self, prefix, params):
+        from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+
+        node_rank = os.environ.get(nodes.NODE_RANK_ENV, "?")
+        phase = os.environ.get(nodes.PHASE_ENV, "")
+        self._log(f"setup:node{node_rank}:phase={phase}:prefix={prefix}")
+
+    def run(self, prefix, params):
+        from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+        from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import (
+            CheckpointResult,
+        )
+
+        node_rank = os.environ.get(nodes.NODE_RANK_ENV, "?")
+        if node_rank == "1":
+            time.sleep(0.2)
+        self._log(f"run:node{node_rank}:prefix={prefix}")
+        return CheckpointResult(durations=[1.0, 1.5])
+
+
+def _run_case_node_worker(
+    node_rank: int, store_port: int, log_path: str, out_q
+) -> None:
+    from gcsfs.tests.perf.subsystembenchmarks._common import nodes, placement
+
+    os.environ["GCSFS_SUBSYSTEM_BUCKET_PREFIX"] = "test-prefix"
+    os.environ["GCSFS_SUBSYSTEM_PROJECT"] = "test-project"
+    os.environ["GCSFS_SUBSYSTEM_LOCATION"] = "us-central1"
+    os.environ[placement.NODES_ENV] = "2"
+    os.environ[placement.DEVICES_PER_NODE_ENV] = "8"
+    os.environ[nodes.NODE_RANK_ENV] = str(node_rank)
+    os.environ[nodes.LEADER_ADDR_ENV] = "127.0.0.1"
+    os.environ[nodes.STORE_PORT_ENV] = str(store_port)
+
+    checkpoint_case.assert_fsspec_gcsfs = lambda p: None
+    original_url_to_fs = fsspec.core.url_to_fs
+
+    def mock_url_to_fs(url, **kwargs):
+        if url.startswith("gs://"):
+            fs, path = original_url_to_fs(url.replace("gs://", "memory://"))
+            fs.makedirs(path, exist_ok=True)
+            fs.pipe_file(os.path.join(path, "model.ckpt"), b"0" * 500)
+            return fs, path
+        return original_url_to_fs(url, **kwargs)
+
+    fsspec.core.url_to_fs = mock_url_to_fs
+
+    bucket_calls = []
+
+    @contextlib.contextmanager
+    def recording_bucket_ctx(spec, case_id, **kw):
+        bucket_calls.append(case_id)
+        with open(log_path, "a") as f:
+            f.write(f"bucket_create:node{node_rank}\n")
+        try:
+            yield "leader-created-bucket"
+        finally:
+            with open(log_path, "a") as f:
+                f.write(f"bucket_delete:node{node_rank}\n")
+
+    bench = _Bench()
+    params = _params(name="mn-case", scenario="checkpoint_write")
+    checkpoint_case.run_checkpoint_case(
+        bench,
+        _Monitor(),
+        params,
+        _MultiNodeFakeDriver(log_path),
+        bucket_ctx=recording_bucket_ctx,
+    )
+    out_q.put((node_rank, bucket_calls, dict(bench.extra_info)))
+
+
+def test_checkpoint_case_follower_uses_leader_bucket(tmp_path):
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        store_port = int(s.getsockname()[1])
+
+    log_path = str(tmp_path / "events.log")
+    ctx = mp.get_context("spawn")
+    out_q = ctx.Queue()
+    procs = [
+        ctx.Process(
+            target=_run_case_node_worker, args=(rank, store_port, log_path, out_q)
+        )
+        for rank in (0, 1)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+    try:
+        for p in procs:
+            assert p.exitcode == 0, f"worker exited with {p.exitcode}"
+        results = {r[0]: (r[1], r[2]) for r in [out_q.get(timeout=5) for _ in range(2)]}
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.kill()
+                p.join(timeout=5)
+
+    assert results[0][0] == ["mn-case"]
+    assert results[1][0] == []
+    assert results[0][1]["checkpoint_physical_size_bytes"] == 500
+    assert results[1][1] == {}
+
+    events = (tmp_path / "events.log").read_text().splitlines()
+    assert (
+        "setup:node0:phase=setup:prefix=gs://leader-created-bucket/checkpoint/"
+        in events
+    )
+    assert (
+        "setup:node1:phase=setup:prefix=gs://leader-created-bucket/checkpoint/"
+        in events
+    )
+    assert "run:node1:prefix=gs://leader-created-bucket/checkpoint/" in events
+    # Leader deletes the bucket only after the follower finished running.
+    assert events.index("run:node1:prefix=gs://leader-created-bucket/checkpoint/") < (
+        events.index("bucket_delete:node0")
+    )

@@ -12,18 +12,62 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict
 
+from gcsfs.tests.perf.subsystembenchmarks._common import accelerator, ray_runtime
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    find_free_port,
+    reduce_durations,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing._llama_tp import apply_llama_tp
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing.model_staging import model_dir
 from gcsfs.tests.perf.subsystembenchmarks.dataloading.driver import assert_fsspec_gcsfs
 
 
-def ensure_ray_initialized():
-    """Initializes local Ray cluster on CPU if not already running."""
-    if not ray.is_initialized():
-        ray.init(
-            include_dashboard=False,
-            ignore_reinit_error=True,
-            logging_level=logging.WARNING,
-        )
+def ensure_ray_initialized(world_size: int | None = None):
+    """Initializes local Ray cluster if not already running."""
+    ray_runtime.ensure_ray_initialized(world_size, check_capacity=True)
+
+
+def kill_actors(workers) -> None:
+    """Explicitly terminate Ray actors before cluster shutdown."""
+    ray_runtime.kill_actors(workers)
+
+
+def shutdown_ray() -> None:
+    """Shut down Ray if initialized and restore any saved TPU launch env vars."""
+    ray_runtime.shutdown_ray()
+
+
+def run_ray_workers(
+    worker_cls,
+    world_size: int,
+    prefix: str,
+    params,
+    *,
+    run_method: str,
+    setup_method: str | None = None,
+):
+    """Spawn ``world_size`` Ray actors, optionally run setup, execute ``run_method``, and kill them."""
+    ensure_ray_initialized(world_size)
+    port = find_free_port()
+    actor_options = accelerator.ray_resources(world_size)
+    workers = []
+    try:
+        workers = [
+            worker_cls.options(**actor_options).remote(
+                rank, world_size, port, prefix, params
+            )
+            for rank in range(world_size)
+        ]
+        if setup_method is not None:
+            ray.get([getattr(w, setup_method).remote() for w in workers])
+        return ray.get([getattr(w, run_method).remote() for w in workers])
+    finally:
+        kill_actors(workers)
+
+
+def reduce_ray_durations(results, world_size: int, rounds: int) -> list[float]:
+    """Reduce per-rank ``[(start, end), ...]`` round timestamps across ``world_size``."""
+    return reduce_durations(results, world_size, rounds)
 
 
 def is_distributed_strategy(strategy: str) -> bool:
@@ -53,14 +97,11 @@ def load_benchmark_model(params):
     import transformers
 
     model_id = params.model_id
-    use_local_files_only = False
-    if model_id.startswith("gs://"):
-        use_local_files_only = True
-        dir_name = os.path.basename(model_id.rstrip("/"))
-        model_id = os.path.join("/tmp", dir_name)
+    use_local_files_only = model_id.startswith("gs://")
+    resolved_model = model_dir(model_id)
 
     payload = transformers.AutoModelForCausalLM.from_pretrained(
-        model_id,
+        resolved_model,
         dtype=torch.bfloat16,
         local_files_only=use_local_files_only,
         use_cache=False,
@@ -89,7 +130,7 @@ def materialize_adamw_states(optimizer):
             )
 
 
-def parallelize_model(model, params):
+def parallelize_model(model, params, device_type: str = "cpu"):
     """Parallelizes the model according to the benchmark strategy."""
     strategy = params.strategy
     if strategy == "single":
@@ -109,7 +150,7 @@ def parallelize_model(model, params):
     )
 
     if strategy in ("fsdp_sharded", "fsdp_full"):
-        mesh = init_device_mesh("cpu", (params.world_size,))
+        mesh = init_device_mesh(device_type, (params.world_size,))
         for layer in model.payload.model.layers:
             fully_shard(layer, mesh=mesh, mp_policy=mp_policy)
         fully_shard(model.payload, mesh=mesh, mp_policy=mp_policy)
@@ -118,7 +159,7 @@ def parallelize_model(model, params):
 
     if strategy in ("model_parallel_sharded", "model_parallel_full"):
         mesh = init_device_mesh(
-            "cpu",
+            device_type,
             (params.data_parallel_size, params.tensor_parallel_size),
             mesh_dim_names=("dp", "tp"),
         )
@@ -136,10 +177,13 @@ def parallelize_model(model, params):
     raise ValueError(f"Unknown strategy: {strategy}")
 
 
-def setup_model_and_optimizer(params):
-    """Loads, parallelizes the benchmark model and materializes AdamW optimizer states."""
+def setup_model_and_optimizer(params, device: torch.device | None = None):
+    """Loads, moves to device, parallelizes the benchmark model, and materializes AdamW states."""
     model = load_benchmark_model(params)
-    model = parallelize_model(model, params)
+    if device is not None:
+        model = model.to(device)
+    device_type = device.type if device is not None else "cpu"
+    model = parallelize_model(model, params, device_type)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     materialize_adamw_states(optimizer)
     return model, optimizer

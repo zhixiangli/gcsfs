@@ -279,7 +279,8 @@ def test_upload_results_works_without_nightly_venv():
 
 # run.py -> pytest (subprocess) -> spawn Manager + 2 ranks, all stuck, like a hung case.
 # Each process appends its pid to argv[1] so the test can check none survives.
-_HUNG_CASE = textwrap.dedent("""
+_HUNG_CASE = textwrap.dedent(
+    """
     import multiprocessing as mp
     import os
     import subprocess
@@ -314,7 +315,8 @@ _HUNG_CASE = textwrap.dedent("""
         else:
             cmd = [sys.executable, __file__, pid_file, "pytest"]
             sys.exit(subprocess.run(cmd).returncode)
-    """)
+    """
+)
 
 
 def _run_case_with_timeout(tmp_path, timeout_s, *cmd):
@@ -571,72 +573,57 @@ def test_cloudbuild_default_model_id_is_empty():
     assert subs["_MODEL_ID"] == ""
 
 
-def test_setup_stages_model_for_legacy_checkpoint_groups_only(tmp_path):
+def test_setup_does_not_download_gcloud_and_staging_is_lazy_in_python(
+    tmp_path, monkeypatch
+):
+    from gcsfs.tests.perf.subsystembenchmarks.checkpointing import model_staging
+
     setup_path = os.path.join(
         _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "setup.sh"
     )
+    install_group_path = os.path.join(
+        _REPO_ROOT, "cloudbuild", "subsystembenchmarks", "scripts", "install-group.sh"
+    )
     subprocess.run(["bash", "-n", setup_path], check=True)
+    subprocess.run(["bash", "-n", install_group_path], check=True)
     with open(setup_path) as f:
-        setup_text = f.read()
+        assert "install-group.sh" in f.read()
+    with open(install_group_path) as f:
+        ig_text = f.read()
+    assert "google-cloud-cli-linux-x86_64.tar.gz" not in ig_text
+    assert "stage_legacy_model" not in ig_text
 
-    stage_block = setup_text.split(
-        'pip install -r "gcsfs/tests/perf/subsystembenchmarks/$GROUP/requirements.txt" >/dev/null\n',
-        1,
-    )[1].split('\nread -r -a REQUIREMENT_SPECS <<< "$REQUIREMENTS_OVERRIDE"', 1)[0]
+    # Non-GCS model IDs pass through untouched.
+    assert model_staging.stage_gcs_model("gpt2") == "gpt2"
+    assert model_staging.stage_gcs_model("") == ""
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    calls = tmp_path / "gcloud_calls"
-    (bin_dir / "curl").write_text(
-        "#!/bin/sh\ntouch google-cloud-cli-linux-x86_64.tar.gz\n"
-    )
-    (bin_dir / "curl").chmod(0o755)
-    (bin_dir / "tar").write_text(
-        "#!/bin/sh\n"
-        "mkdir -p google-cloud-sdk/bin\n"
-        f'printf "#!/bin/sh\\necho \\"\\$@\\" >> {calls}\\n" > google-cloud-sdk/bin/gcloud\n'
-        "chmod 0755 google-cloud-sdk/bin/gcloud\n"
-    )
-    (bin_dir / "tar").chmod(0o755)
+    # Path traversal in GCS model_id is rejected.
+    with pytest.raises(ValueError, match="Invalid GCS model_id"):
+        model_staging.model_dir("gs://bucket/..")
 
-    py_bin = os.path.dirname(sys.executable)
-    env_path = f"{bin_dir}:{py_bin}:{os.environ['PATH']}"
+    # Lazy staging downloads safetensors atomically and reuses cached dir.
+    target = tmp_path / "MyModel"
+    monkeypatch.setattr(model_staging, "model_dir", lambda mid: str(target))
+    get_calls = []
 
-    def run_stage(group: str, model_id: str) -> tuple[list[str], str]:
-        calls.write_text("")
-        fake_tmp = tmp_path / f"tmp-{len(list(tmp_path.iterdir()))}"
-        fake_tmp.mkdir()
-        script = (
-            "set -euo pipefail\n"
-            + stage_block.replace("/tmp", str(fake_tmp))
-            + '\nprintf "FINAL_MODEL_ID=%s\\n" "${MODEL_ID:-}"\n'
-        )
-        proc = subprocess.run(
-            ["bash", "-c", script],
-            cwd=_REPO_ROOT,
-            env={"PATH": env_path, "GROUP": group, "MODEL_ID": model_id},
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        final_mid = re.findall(r"^FINAL_MODEL_ID=(.*)$", proc.stdout, re.M)[-1]
-        return calls.read_text().splitlines(), final_mid
+    class _FakeFS:
+        def ls(self, prefix, detail=False):
+            return [
+                {"name": f"{prefix}/config.json", "type": "file"},
+                {"name": f"{prefix}/model.safetensors", "type": "file"},
+            ]
 
-    # 1. Legacy checkpointing group with empty MODEL_ID stages common.model_id without mutating MODEL_ID.
-    pl_calls, pl_mid = run_stage("checkpointing/pytorch_lightning", "")
-    assert len(pl_calls) == 1
-    assert pl_calls[0].startswith(
-        "storage cp -r gs://huggingface-model-weights/Llama-3.1-8B "
-    )
-    assert pl_mid == ""
+        def get(self, rpaths, lpaths):
+            get_calls.append((list(rpaths), list(lpaths)))
+            for lp in lpaths:
+                with open(lp, "wb") as fh:
+                    fh.write(b"{}")
 
-    # 2. Legacy checkpointing group with explicit MODEL_ID override stages the override.
-    ray_calls, ray_mid = run_stage("checkpointing/ray_pytorch", "gs://custom/model/")
-    assert len(ray_calls) == 1
-    assert ray_calls[0].startswith("storage cp -r gs://custom/model ")
-    assert ray_mid == "gs://custom/model/"
-
-    # 3. DCP checkpointing groups stage via gcsfs in Python and never install standalone gcloud.
-    for dcp_group in ("checkpointing/pytorch", "checkpointing/pytorch_load"):
-        dcp_calls, _ = run_stage(dcp_group, "gs://custom/model")
-        assert dcp_calls == []
+    monkeypatch.setattr(model_staging.gcsfs, "GCSFileSystem", _FakeFS)
+    staged = model_staging.stage_gcs_model("gs://my-bucket/MyModel")
+    assert staged == str(target)
+    assert len(get_calls) == 1
+    assert model_staging._has_safetensors(str(target))
+    # Second call reuses existing local dir without re-downloading.
+    assert model_staging.stage_gcs_model("gs://my-bucket/MyModel") == str(target)
+    assert len(get_calls) == 1

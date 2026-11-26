@@ -1,13 +1,17 @@
 import functools
 
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.fsspec_filesystem import FsspecReader, FsspecWriter
 
-from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import run_split
+from gcsfs.tests.perf.subsystembenchmarks._common import nodes
+from gcsfs.tests.perf.subsystembenchmarks.checkpointing._dist import (
+    local_nprocs_for_world_size,
+    run_split,
+)
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.driver import CheckpointResult
 from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.common import (
     DCPDriver,
     build_state,
+    import_fsspec_filesystem,
     rank_session,
     spawn_with_stats,
     timed,
@@ -28,6 +32,8 @@ from gcsfs.tests.perf.subsystembenchmarks.checkpointing.pytorch.state import (
     assert_loaded_state,
     expected_bytes_requested,
 )
+
+FsspecReader, FsspecWriter = import_fsspec_filesystem()
 
 
 def _rank_save_source(rank, world_size, port, prefix, params, q, *, weights):
@@ -76,7 +82,10 @@ class PyTorchCheckpointReadDriver(DCPDriver):
     def setup(self, prefix, params):
         source = params.source_layout()
         self.prepare(params, source, params.target_layout())
-        weights = load_weights(params.model_id)
+        local_nprocs = local_nprocs_for_world_size(
+            source.world_size, nodes.NodeGroup.from_env()
+        )
+        weights = load_weights(params.model_id) if local_nprocs > 0 else {}
         try:
             run_split(
                 prefix,
@@ -88,7 +97,11 @@ class PyTorchCheckpointReadDriver(DCPDriver):
             weights.clear()
 
     def run(self, prefix, params):
-        weights = load_weights(params.model_id)
+        target_ws = params.target_layout().world_size
+        local_nprocs = local_nprocs_for_world_size(
+            target_ws, nodes.NodeGroup.from_env()
+        )
+        weights = load_weights(params.model_id) if local_nprocs > 0 else {}
         ranks = None
 
         def _close() -> None:
@@ -106,7 +119,7 @@ class PyTorchCheckpointReadDriver(DCPDriver):
 
         try:
             ranks, stats = spawn_with_stats(
-                prefix, params, _rank_load, params.target_layout().world_size, weights
+                prefix, params, _rank_load, target_ws, weights
             )
             fetched = [s["bytes_fetched"] for s in stats]
             total_fetched = sum(fetched)
