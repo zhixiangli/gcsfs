@@ -13,6 +13,20 @@ substitutions:
   _BOOT_DISK_SIZE: "200GB"
   _MODE: "nightly"  # nightly | ci (per-PR lightweight suite: scripts/run-ci.sh runs fixed cases; _GROUP/_BUCKET_TYPE/_FILTER/_SWEEP_AXES/_MODEL_ID/_REQUIREMENTS are ignored)
   _CI_MODEL_ID: ""  # _MODE=ci only: gs:// copy of gpt2 the VM service account can read (default gs://huggingface-model-weights/gpt2)
+  _ACCELERATOR: "cpu"  # cpu (ephemeral VM) | gpu | tpu (shared GKE cluster)
+  _GKE_CLUSTER: ""  # required when _ACCELERATOR is gpu or tpu
+  _GKE_CLUSTER_PROJECT: ""  # required when _ACCELERATOR is gpu or tpu
+  _GKE_CLUSTER_LOCATION: ""  # cluster region/zone for get-credentials; required for gpu/tpu
+  _GKE_NAMESPACE: "default"  # target Kubernetes namespace
+  _GKE_ENDPOINT: "default"  # default | internal-ip | dns
+  _GKE_QUEUE: ""  # optional Kueue LocalQueue label
+  _TPU_PRIORITY: "low"  # medium | low | very-low
+  _TPU_DURATION: "180"  # declared-duration-minutes pod label on TPU
+  _TPU_PLACEMENT_POLICY: ""  # required when a multi-node TPU release is launched
+  _MAX_CASES_PER_RELEASE: ""  # optional batch cap per JobSet (exact case IDs)
+  _MAX_CONCURRENT_RELEASES: "1"  # max concurrent GKE releases
+  _GKE_DEADLINE_SECONDS: "16200"  # overall queueing + run deadline (default 270m < 5h build timeout)
+  _GCSFS_REPO: "https://github.com/fsspec/gcsfs.git"  # repo cloned by GKE pods at COMMIT_SHA
 
 steps:
   # 1. Generate a persistent SSH key for this build run.
@@ -22,6 +36,7 @@ steps:
     args:
       - "-c"
       - |
+        if [ "${_ACCELERATOR}" != "cpu" ]; then echo "Skipping: _ACCELERATOR=${_ACCELERATOR}"; exit 0; fi
         mkdir -p /workspace/.ssh
         ssh-keygen -t rsa -f /workspace/.ssh/google_compute_engine -N '' -C gcb
         cat /workspace/.ssh/google_compute_engine.pub > /workspace/gcb_ssh_key.pub
@@ -129,6 +144,36 @@ steps:
         } > /workspace/build_vars.env
     waitFor: ["-"]
 
+  # 2b. Validate accelerator / GKE substitutions and write /workspace/gke_vars.env.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "init-gke-variables"
+    entrypoint: "bash"
+    env:
+      - "COMMIT_SHA=${COMMIT_SHA}"
+      - "_INFRA_PREFIX=${_INFRA_PREFIX}"
+      - "_ZONE=${_ZONE}"
+      - "_MODE=${_MODE}"
+      - "_HF_TOKEN=${_HF_TOKEN}"
+      - "_ACCELERATOR=${_ACCELERATOR}"
+      - "_GKE_CLUSTER=${_GKE_CLUSTER}"
+      - "_GKE_CLUSTER_PROJECT=${_GKE_CLUSTER_PROJECT}"
+      - "_GKE_CLUSTER_LOCATION=${_GKE_CLUSTER_LOCATION}"
+      - "_GKE_NAMESPACE=${_GKE_NAMESPACE}"
+      - "_GKE_ENDPOINT=${_GKE_ENDPOINT}"
+      - "_GKE_QUEUE=${_GKE_QUEUE}"
+      - "_TPU_PRIORITY=${_TPU_PRIORITY}"
+      - "_TPU_DURATION=${_TPU_DURATION}"
+      - "_TPU_PLACEMENT_POLICY=${_TPU_PLACEMENT_POLICY}"
+      - "_MAX_CASES_PER_RELEASE=${_MAX_CASES_PER_RELEASE}"
+      - "_MAX_CONCURRENT_RELEASES=${_MAX_CONCURRENT_RELEASES}"
+      - "_GKE_DEADLINE_SECONDS=${_GKE_DEADLINE_SECONDS}"
+      - "_GCSFS_REPO=${_GCSFS_REPO}"
+    args:
+      - "-c"
+      - |
+        bash cloudbuild/subsystembenchmarks/scripts/init-gke-variables.sh /workspace/gke_vars.env
+    waitFor: ["-"]
+
   # Reap VMs leaked by failed or cancelled builds before requesting new capacity.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-leaked-resources"
@@ -190,7 +235,31 @@ steps:
           fi
         done
 
-    waitFor: ["init-variables"]
+    waitFor: ["init-variables", "init-gke-variables"]
+    allowFailure: true
+
+  # Reap stale (>10 h) GKE Helm releases left behind by cancelled or timed-out builds.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-leaked-gke"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ "${_ACCELERATOR}" = "cpu" ]; then echo "Skipping: CPU run"; exit 0; fi
+        set -e
+        source /workspace/build_vars.env
+        source /workspace/gke_vars.env
+        mkdir -p /workspace/.kube
+        export KUBECONFIG=/workspace/.kube/config
+        bash cloudbuild/subsystembenchmarks/scripts/gke-tools.sh
+        export PATH="/workspace/.ssb-tools:$$PATH"
+        CTX=$$(bash cloudbuild/subsystembenchmarks/scripts/gke-credentials.sh "$$GKE_CLUSTER" "$$GKE_CLUSTER_PROJECT" "$$GKE_CLUSTER_LOCATION" "$$GKE_ENDPOINT")
+        bash cloudbuild/subsystembenchmarks/scripts/gke-cleanup.sh \
+          --kube-context "$$CTX" \
+          --namespace "$$GKE_NAMESPACE" \
+          --infra-prefix "$$INFRA_PREFIX" \
+          --older-than-hours 10
+    waitFor: ["init-variables", "init-gke-variables"]
     allowFailure: true
 
 
@@ -214,7 +283,7 @@ steps:
           gcloud storage buckets create gs://$$RESULTS_BUCKET --project=${PROJECT_ID} \
             --location=$$REGION --enable-hierarchical-namespace --uniform-bucket-level-access
         fi
-    waitFor: ["init-variables"]
+    waitFor: ["init-variables", "init-gke-variables"]
     allowFailure: true
 
   # 4. Create the benchmark VM (CPU now; auto-detect makes the benchmark GPU-ready).
@@ -224,6 +293,7 @@ steps:
     args:
       - "-c"
       - |
+        if [ "${_ACCELERATOR}" != "cpu" ]; then echo "Skipping: _ACCELERATOR=${_ACCELERATOR}"; exit 0; fi
         set -e
         trap 'echo "create-vm" >> /workspace/FAILED' ERR
         if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
@@ -246,7 +316,7 @@ steps:
             --tags="allow-ssh" \
             --labels="build-id=$$RUN_ID" \
             --quiet
-    waitFor: ["cleanup-leaked-resources"]
+    waitFor: ["cleanup-leaked-resources", "init-gke-variables"]
     allowFailure: true
 
   # 5. Run the subsystem benchmark group and upload its results.
@@ -257,6 +327,7 @@ steps:
     args:
       - "-c"
       - |
+        if [ "${_ACCELERATOR}" != "cpu" ]; then echo "Skipping: _ACCELERATOR=${_ACCELERATOR}"; exit 0; fi
         set -e
         if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
         source /workspace/build_vars.env
@@ -307,6 +378,25 @@ steps:
         exit $$RUN_RC
     waitFor: ["create-vm", "create-buckets", "generate-ssh-key"]
 
+  # 5b. Run the subsystem benchmark group on a shared GKE GPU/TPU cluster.
+  - name: "python:3.12-slim"
+    id: "run-subsystembenchmarks-gke"
+    allowFailure: true
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ "${_ACCELERATOR}" = "cpu" ]; then echo "Skipping: CPU run"; exit 0; fi
+        set -e
+        if [[ -f /workspace/FAILED ]]; then echo "Skipping: previous step failed"; exit 0; fi
+        record_failure() { echo "run-subsystembenchmarks-gke" >> /workspace/FAILED; }
+        trap 'record_failure' ERR
+        mkdir -p /workspace/.kube
+        export KUBECONFIG=/workspace/.kube/config
+        bash cloudbuild/subsystembenchmarks/scripts/gke-tools.sh
+        bash cloudbuild/subsystembenchmarks/scripts/gke-run.sh
+    waitFor: ["create-buckets", "cleanup-leaked-gke"]
+
   # --- Cleanup ---
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "cleanup-ssh-key"
@@ -314,6 +404,7 @@ steps:
     args:
       - "-c"
       - |
+        if [ "${_ACCELERATOR}" != "cpu" ]; then echo "Skipping: _ACCELERATOR=${_ACCELERATOR}"; exit 0; fi
         gcloud compute os-login ssh-keys remove --key-file=/workspace/gcb_ssh_key.pub || true
     waitFor: ["run-subsystembenchmarks"]
 
@@ -323,9 +414,32 @@ steps:
     args:
       - "-c"
       - |
+        if [ "${_ACCELERATOR}" != "cpu" ]; then echo "Skipping: _ACCELERATOR=${_ACCELERATOR}"; exit 0; fi
         source /workspace/build_vars.env
         gcloud compute instances delete "$$VM_NAME" --project="${PROJECT_ID}" --zone="$$ZONE" --quiet || true
     waitFor: ["run-subsystembenchmarks"]
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "cleanup-gke"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        if [ "${_ACCELERATOR}" = "cpu" ]; then echo "Skipping: CPU run"; exit 0; fi
+        source /workspace/build_vars.env
+        source /workspace/gke_vars.env
+        mkdir -p /workspace/.kube
+        export KUBECONFIG=/workspace/.kube/config
+        bash cloudbuild/subsystembenchmarks/scripts/gke-tools.sh || true
+        export PATH="/workspace/.ssb-tools:$$PATH"
+        CTX=$$(bash cloudbuild/subsystembenchmarks/scripts/gke-credentials.sh "$$GKE_CLUSTER" "$$GKE_CLUSTER_PROJECT" "$$GKE_CLUSTER_LOCATION" "$$GKE_ENDPOINT" || true)
+        if [ -n "$$CTX" ]; then
+          bash cloudbuild/subsystembenchmarks/scripts/gke-cleanup.sh \
+            --kube-context "$$CTX" \
+            --namespace "$$GKE_NAMESPACE" \
+            --build-id "$$RUN_ID" || true
+        fi
+    waitFor: ["run-subsystembenchmarks-gke"]
 
   # Safety net: each case deletes its own objects and (for buckets without a cache) its bucket.
   # For Rapid Cache and RCU runs, GCS refuses to delete the emptied buckets for a while after
@@ -366,7 +480,7 @@ steps:
             gcloud storage rm --recursive "$$b" < /dev/null || gcloud storage buckets delete "$$b" --quiet < /dev/null || true
           fi
         done
-    waitFor: ["run-subsystembenchmarks"]
+    waitFor: ["run-subsystembenchmarks", "cleanup-gke"]
 
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "check-failure"
@@ -380,7 +494,7 @@ steps:
           exit 1
         fi
         echo "Build successful."
-    waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key"]
+    waitFor: ["cleanup-vm", "delete-buckets", "cleanup-ssh-key", "cleanup-gke"]
 
 timeout: "18000s"
 options:

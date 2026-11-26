@@ -143,8 +143,22 @@ normalized override are published with every result row.
 | `_MACHINE_TYPE` | `c4-standard-192` | Compute Engine machine type used for the benchmark VM. |
 | `_REQUIREMENTS` | empty | Whitespace-separated pip requirement specs installed last. Use this to select the `gcsfs` build under test. |
 | `_SWEEP_AXES` | empty | Whitespace-separated configuration-axis names. Empty runs all configured cases; any selection still includes the implicit baseline case. |
-| `_MODE` | `nightly` | `nightly` runs `_GROUP` as configured. `ci` runs the fixed per-PR suite in `scripts/run-ci.sh` and ignores `_GROUP`, `_BUCKET_TYPE`, `_FILTER`, `_SWEEP_AXES`, `_MODEL_ID`, and `_REQUIREMENTS`. |
+| `_MODE` | `nightly` | `nightly` runs `_GROUP` as configured. `ci` runs the fixed per-PR suite in `scripts/run-ci.sh` (CPU only) and ignores `_GROUP`, `_BUCKET_TYPE`, `_FILTER`, `_SWEEP_AXES`, `_MODEL_ID`, and `_REQUIREMENTS`. |
 | `_CI_MODEL_ID` | empty | `_MODE=ci` only: `gs://` copy of `gpt2` that `_VM_SERVICE_ACCOUNT` can read. Empty uses `gs://huggingface-model-weights/gpt2`. |
+| `_ACCELERATOR` | `cpu` | Execution target: `cpu` (ephemeral VM, unchanged), `gpu`, or `tpu` (shared GKE cluster via Helm JobSets). |
+| `_GKE_CLUSTER` | empty | Target GKE cluster name (required when `_ACCELERATOR` is `gpu` or `tpu`). |
+| `_GKE_CLUSTER_PROJECT` | empty | Project owning `_GKE_CLUSTER` (required for `gpu`/`tpu`). |
+| `_GKE_CLUSTER_LOCATION` | empty | Region or zone of `_GKE_CLUSTER` for `get-credentials` (required for `gpu`/`tpu`; `_ZONE` must be in its region). |
+| `_GKE_NAMESPACE` | `default` | Target Kubernetes namespace for Helm releases and pods. |
+| `_GKE_ENDPOINT` | `default` | Cluster control-plane connection mode: `default` (public), `internal-ip`, or `dns` (`--dns-endpoint`). |
+| `_GKE_QUEUE` | empty | Optional Kueue LocalQueue label (`kueue.x-k8s.io/queue-name`). |
+| `_TPU_PRIORITY` | `low` | TPU Kueue priority class (`medium`, `low`, or `very-low`). |
+| `_TPU_DURATION` | `180` | TPU `declared-duration-minutes` pod label. |
+| `_TPU_PLACEMENT_POLICY` | empty | `cloud.google.com/placement-policy-name` value; required when a multi-node TPU release is launched. |
+| `_MAX_CASES_PER_RELEASE` | empty | Split each node count's selected cases into batches of at most N exact case IDs (useful for TPU groups under the Kueue duration limit). |
+| `_MAX_CONCURRENT_RELEASES` | `1` | Maximum concurrent GKE Helm releases per build. |
+| `_GKE_DEADLINE_SECONDS` | `16200` | Overall queueing + run deadline in seconds (default 270 min, below the 5 h build timeout). |
+| `_GCSFS_REPO` | `https://github.com/fsspec/gcsfs.git` | Git repository cloned by GKE pods at `COMMIT_SHA`. |
 
 `PROJECT_ID`, `LOCATION`, `BUILD_ID`, `BRANCH_NAME`, and `COMMIT_SHA` are Cloud
 Build built-ins rather than custom substitutions.
@@ -328,3 +342,155 @@ artifact URI pattern. On every ingestion run, the pipeline:
 `source_uri`, so rerunning ingestion does not append the same artifact twice.
 The complete evolving metric-column inventory lives in
 [`subsystembenchmarks_schema.json`](subsystembenchmarks_schema.json).
+
+## Running on GKE GPU and TPU clusters
+
+Every benchmark group can also run directly on GKE GPU (8×H200 per node) and
+TPU (4 TPU7x chips / 8 TensorCores per node) clusters using the Helm chart in
+[`helm_chart/`](helm_chart/) and the launcher script
+[`scripts/run-gke.sh`](scripts/run-gke.sh). All cluster-specific values
+(context, project, region, zone, placement policy) are passed as flags rather
+than hard-coded in the repository.
+
+### Prerequisites
+
+1. **Tools:** `gcloud`, `kubectl`, `helm` (v3+), and a local Python environment
+   that can collect case node counts (`python3 -m gcsfs.tests.perf.subsystembenchmarks.run --list-node-counts`).
+2. **Cluster credentials:**
+
+   ```bash
+   gcloud container clusters get-credentials <gpu-cluster> \
+     --region <gpu-region> --project <gpu-cluster-project>
+
+   gcloud container clusters get-credentials <tpu-cluster> \
+     --region <tpu-region> --project <tpu-cluster-project>
+   ```
+
+3. **IAM & bucket access:**
+   - **GPU pods:** run with `hostNetwork: false` so GKE Workload Identity binds
+     the namespace's `default` Kubernetes service account. That identity needs
+     bucket create/delete access in `<bucket-project>`, write access to
+     `--results-uri`, `roles/monitoring.viewer` in `<bucket-project>` (for
+     `--require-amplification`), and `roles/storage.objectViewer` on the model
+     weight buckets.
+   - **TPU pods:** run under the cluster's GCE node service account and need
+     bucket create/delete access in `<bucket-project>`, write access to
+     `--results-uri`, `roles/monitoring.viewer` in `<bucket-project>`, and
+     `roles/storage.objectViewer` on the model weight buckets.
+   - Pods run `run.py --preflight` before executing any benchmark case, failing
+     fast with the exact resource if bucket create/delete or model read access
+     is missing.
+
+4. **Source revision:** push the branch or commit you want the pods to clone and
+   pass `--commit <SHA>` (defaults to local `HEAD`).
+
+### Launching with `run-gke.sh`
+
+`run-gke.sh` queries `--list-node-counts` (or `--list-cases` when
+`--max-cases-per-release` is set) for the target group and accelerator, then
+installs one Helm release (JobSet + headless Service) per planned batch (for
+example, 1-node for `world_size <= 8` cases and 2-node SPMD for the 16-rank
+DCP cases). On TPU, releases satisfy Kueue rules automatically: release names
+are `<= 20` characters (`ssb-<abbr>-<n>n-<4hex>`), JobSet labels set
+`kueue.x-k8s.io/priority-class` (`medium`, `low`, or `very-low`), and pods set
+`declared-duration-minutes` (default `180`). Multi-node TPU releases require
+`--tpu-placement-policy`.
+
+```bash
+# Dry-run: print rendered helm install commands without scheduling pods
+cloudbuild/subsystembenchmarks/scripts/run-gke.sh \
+  --accelerator gpu \
+  --kube-context <gpu-kube-context> \
+  --project <bucket-project> \
+  --location <gpu-region> \
+  --zone <gpu-zone> \
+  --group checkpointing/pytorch_save \
+  --results-uri gs://<your-results-bucket>/subsystembenchmarks \
+  --dry-run
+
+# Run a group on a GPU cluster (regional buckets)
+cloudbuild/subsystembenchmarks/scripts/run-gke.sh \
+  --accelerator gpu \
+  --kube-context <gpu-kube-context> \
+  --project <bucket-project> \
+  --location <gpu-region> \
+  --zone <gpu-zone> \
+  --group checkpointing/pytorch_save \
+  --bucket-type regional \
+  --results-uri gs://<your-results-bucket>/subsystembenchmarks
+
+# Run a batched TPU checkpoint group with a multi-node placement policy
+cloudbuild/subsystembenchmarks/scripts/run-gke.sh \
+  --accelerator tpu \
+  --kube-context <tpu-kube-context> \
+  --project <bucket-project> \
+  --location <tpu-region> \
+  --zone <tpu-zone> \
+  --tpu-placement-policy <tpu-placement-policy> \
+  --max-cases-per-release 4 \
+  --group checkpointing/pytorch_reshard \
+  --bucket-type regional \
+  --results-uri gs://<your-results-bucket>/subsystembenchmarks
+```
+
+Node 0 uploads `/results` (`results.json` and `results.csv`) whenever
+`results.csv` exists, using the BigQuery ingestion layout:
+
+```text
+<results-uri>/branch=<branch>/<YYYYMMDD>/<run-id>/<release>/<YYYYMMDD-HHMMSS>/
+```
+
+### Scheduled GPU and TPU runs via Cloud Build
+
+The same `subsystembenchmarks-cloudbuild.yaml` pipeline runs GPU and TPU groups
+when triggered with `_ACCELERATOR=gpu` or `_ACCELERATOR=tpu` (for example from
+Terraform triggers and Cloud Scheduler jobs):
+
+- CPU-only VM steps no-op; GKE steps (`init-gke-variables`,
+  `cleanup-leaked-gke`, `run-subsystembenchmarks-gke`, `cleanup-gke`) validate
+  inputs, install pinned `gcloud`/`kubectl`/`helm`, fetch cluster credentials,
+  run `scripts/run-gke.sh`, and clean up releases by build ID.
+- Case buckets are created in the build's `PROJECT_ID` with the same
+  `BUCKET_PREFIX` so the existing `delete-buckets` and `cleanup-leaked-resources`
+  steps cover GPU/TPU runs unchanged.
+- Artifacts upload to `gs://<_INFRA_PREFIX>-run-results/subsystembenchmarks/branch=<branch>/<YYYYMMDD>/<BUILD_ID>/<release>/<YYYYMMDD-HHMMSS>/`,
+  which the unchanged `subsystembenchmarks-ingestion-cloudbuild.yaml` pipeline
+  loads into `history_subsystem` (rows carry `compute_accelerator_type` and
+  `machine_type`).
+- `_HF_TOKEN` must be empty and `_MODE` must be `nightly`; `COMMIT_SHA` must be
+  set so pods clone the exact revision under test.
+- **Additional one-time access for Cloud Build GKE triggers:**
+  - Trigger service account: `roles/container.developer` on
+    `<gpu-cluster-project>` and `<tpu-cluster-project>`, plus network
+    reachability from `cloud-build-worker-pool` to the cluster control planes
+    (adjust `_GKE_ENDPOINT` to `internal-ip` or `dns` if needed).
+  - GPU/TPU pod identities: `roles/storage.admin` conditioned on
+    `<_INFRA_PREFIX>-*` buckets in `<build-project>`, object write on
+    `gs://<_INFRA_PREFIX>-run-results`, `roles/monitoring.viewer` in
+    `<build-project>`, and `roles/storage.objectViewer` on the model weight
+    buckets.
+
+```bash
+gcloud builds triggers create manual \
+  --name=gcsfs-subsystembench-tpu-save \
+  --region=<LOCATION> \
+  --repo=<YOUR_REPO> \
+  --repo-type=<GITHUB|CLOUD_SOURCE_REPOSITORIES> \
+  --branch=main \
+  --build-config=cloudbuild/subsystembenchmarks/subsystembenchmarks-cloudbuild.yaml \
+  --substitutions=_ACCELERATOR=tpu,_INFRA_PREFIX=gcsfs-subsystembench,_ZONE=<tpu-zone>,_GROUP=checkpointing/pytorch_save,_GKE_CLUSTER=<tpu-cluster>,_GKE_CLUSTER_PROJECT=<tpu-cluster-project>,_GKE_CLUSTER_LOCATION=<tpu-region>,_TPU_PLACEMENT_POLICY=<tpu-placement-policy>,_MAX_CASES_PER_RELEASE=4
+```
+
+### Cleanup
+
+`run-gke.sh` uninstalls each Helm release (and its JobSet) once it completes,
+fails, or exceeds `--deadline-seconds` (default `16200` s = 270 min), and
+registers an exit/signal trap for interrupted runs. After a hard interrupt or
+pod crash, verify no releases, JobSets, or temporary `ssb-<gpu|tpu>-*` buckets
+remain:
+
+```bash
+helm list --kube-context <context> -n <namespace>
+kubectl --context <context> -n <namespace> get jobsets
+gcloud storage buckets list --project <bucket-project> --filter='name:ssb-*'
+```
