@@ -15,7 +15,7 @@ Cross-references:
 - [ ] **Private/experimental upstream APIs (diff check).** Search added lines for `._`, `_experimental`, `google.cloud._storage_v2`, or undocumented `grpc.*` channel args. Any temporary workaround requires a `TODO` with an upstream issue/PR link AND justification why fixing upstream isn't cheaper.
 - [ ] **`fsspec` CI-on-HEAD vs. `2026.9.0` skew (diff check).** CI installs `filesystem_spec` git HEAD while PyPI users run `fsspec>=2026.9.0`. Search added lines for post-`2026.9.0` kwargs/features (e.g., `_expand_path(..., withdirs=)`, removing the `AdaptiveReadaheadCache` loop-rebind workaround, `DirFileSystem` HEAD fixes) per [upstream-contracts.md §1](references/upstream-contracts.md#ci-on-head-vs-fsspec202690-skew-table).
 - [ ] **Dual import-time mode (`GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=false/true`).** Does the change work cleanly under both `CoreGCSFileSystem` (`false`) and `ExtendedGcsFileSystem` (`true`)? Remember the class swap in `gcsfs/__init__.py` is import-time only.
-- [ ] **Existing counterpart.** Grep for existing helpers before accepting a second definition: `_dircache.py`, `_validate_grpc_write_kms_key_name`, `_classify_layout_error`, `as_byte_buffer`, `is_empty_range`, `_resolve_generation_match`, `zb_hns_utils.download_range`, `poll_lro`, `fsspec.asyn.sync_teardown`, `tests/layouts.py`, `tests/lro_fakes.py`.
+- [ ] **Existing counterpart.** Grep for existing helpers before accepting a second definition: `_dircache.py`, `_validate_grpc_write_kms_key_name`, `_classify_layout_error`, `as_byte_buffer`, `is_empty_range`, `_resolve_generation_match`, `zb_hns_utils.download_range`, `poll_lro`, `fsspec.asyn.sync_teardown` / `zb_hns_utils.sync_teardown`, `tests/layouts.py`, `tests/lro_fakes.py`.
 - [ ] **One-sided design.** Is the fix/feature added only to `GCSFileSystem` or only `ExtendedGcsFileSystem`, only `GCSFile` or only `ZonalFile`, only one write entry point (`_put_file` / `_pipe_file` / `_perform_parallel_upload` / `simple_upload` / `initiate_upload`), only Flat/HNS/Zonal/RCU (`rcu_rapid_write=False` vs `True`), or only sync vs native `asynchronous=True`? Ask why it isn't symmetric.
 - [ ] **Value & performance evidence.** Does a new public API, knob, or extension point have a concrete in-repo consumer or named user? Do hot-path performance PRs adding complexity include multi-run benchmark numbers beating noise (and does the diff actually contain a plausible mechanism for the claimed gain)?
 
@@ -108,7 +108,7 @@ Enforce every rule in [_agents/rules/security.md](../../rules/security.md) (and 
 - [ ] **CI, Codecov, Benchmarks & Cloud Build wiring (diff check).**
   - New tests under `gcsfs/tests/perf/**`: `conftest.py`'s `pytest_ignore_collect` skips them by default, and infra unit tests must live at top-level `gcsfs/tests/perf/microbenchmarks/test_*.py` (never inside a benchmark group subdir) and run under `.github/workflows/ci.yml` `--run-benchmarks-infra`.
   - Codecov enforces 80% patch coverage (0% drop) — flag dead/untested branches.
-  - `cloudbuild/e2e/`: worker counts must match across `create_buckets.sh`, `run_tests.sh`, and `cleanup.sh`; quote shell vars (`"$VAR"`); use Helm `--set-literal` for comma/bracket values.
+  - `cloudbuild/` E2E scripts: worker counts must match across `cloudbuild/create_buckets.sh`, `cloudbuild/run_tests.sh`, and `cloudbuild/cleanup.sh`; quote shell vars (`"$VAR"`); use Helm `--set-literal` for comma/bracket values.
 
 ## 7. Scope, Naming, Description, Docs & Changelog
 

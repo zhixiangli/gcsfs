@@ -112,7 +112,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
   - Round-robin sharers use a lock-free `_inflight` counter on each MRD wrapper.
   - `_is_stale` rejects idle cached MRDs whose `persisted_size < pool.persisted_size` (Zonal appends and finalization preserve object generation while growing `persisted_size`!) and parks them in `_stale_mrds` for deferred close.
   - **Known gap to watch**: neither `MRDPool` nor `MRDPoolCache.release` currently checks `mrd.is_stream_open`. After `DataCorruption`, `AsyncMultiRangeDownloader` closes itself; recycling a closed MRD poisons subsequent reads in the pool. Any PR touching MRD acquisition/release/recovery should guard `is_stream_open`.
-  - `MRDPoolCache` holds `weakref.ref(gcsfs)` to avoid reference cycles, keys pools by `(bucket, object, str(gen) if gen is not None else None, cache_type)`, and protects active keys from LRU eviction via `_incref`/`_decref`. Use `_close_pool(pool)` (shielded) on cancellation-sensitive teardown paths.
+  - `MRDPoolCache` holds `weakref.ref(gcsfs)` to avoid reference cycles, keys pools by `(bucket, object, str(gen) if gen is not None else None, cache_type)`, and protects active keys from LRU eviction via `_incref`/`_decref`. Use `extended_gcsfs._close_pool(pool)` (shielded, defined in `gcsfs/extended_gcsfs.py`) on cancellation-sensitive teardown paths.
 - **`download_ranges` & `_cat_ranges` (`zb_hns_utils.py`, `extended_gcsfs.py`)**:
   - Respect `MRD_MAX_RANGES = 1000` per `download_ranges` call.
   - Guard `length == 0` **before** calling `download_ranges`: GCS `BidiReadObject` interprets `read_length=0` as "read from offset to EOF", causing silent full-file reads / OOM.
@@ -168,8 +168,8 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
 
 ## 10. Usage Telemetry Architecture & Wire Schema
 
-- **Wire format (`telemetry/features_proto.py`, `telemetry/schema.py`, `telemetry/grpc.py`)**:
-  - Header/metadata key: `HTTP_HEADER_KEY = "x-goog-storage-gcsfs-features"` (lowercase for `GRPC_METADATA_KEY`; gRPC rejects uppercase metadata keys).
+- **Wire format (`telemetry/context.py`, `telemetry/features_proto.py`, `telemetry/schema.py`, `telemetry/grpc.py`)**:
+  - Header/metadata keys: `HTTP_HEADER_KEY = "X-Goog-Storage-Gcsfs-Features"` (Title-Case for HTTP) and `GRPC_METADATA_KEY = "x-goog-storage-gcsfs-features"` (strictly lowercase; gRPC rejects uppercase metadata keys).
   - Payload: URL-safe base64-encoded `GcsfsFeatures` protobuf.
   - **Reserved `GcsfsMethod` wire IDs (`2, 42, 43, 45`)**: NEVER reuse or renumber existing or reserved enum values.
   - Every tracked token name in `schema.py` / `wrapper.py` must match the lowercased enum suffix in `features_proto.py`.
@@ -188,7 +188,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
 ## 11. Tests, CI, Cloud Build & Benchmark Invariants
 
 - **Broken pytest marks trap (`gcsfs/tests/conftest.py`)**:
-  - `@pytest.mark.requires_real_gcs`, `@pytest.mark.requires_hns`, and `@pytest.mark.requires_rapid` **silently do NOT skip** (there is no `pytest_collection_modifyitems` hook wiring them). Tests MUST import the `skipif` markers from `gcsfs.tests.conftest` (e.g. `skip_if_zonal`, `skip_if_grpc_read`, or the module's `pytest.mark.skipif` helpers).
+  - `@pytest.mark.requires_real_gcs`, `@pytest.mark.requires_hns`, and `@pytest.mark.requires_rapid` **silently do NOT skip** (there is no `pytest_collection_modifyitems` hook wiring them). Tests MUST import the `pytest.mark.skipif` decorators `requires_real_gcs`, `requires_hns`, and `requires_rapid` from `gcsfs.tests.conftest` (whereas `skip_if_zonal(gcs)` and `skip_if_grpc_read(gcs)` are runtime helpers called inside test bodies, not decorators).
 - **Autouse gRPC guard (`_forbid_remote_grpc_connections`, `conftest.py`)**:
   - Unit tests forbid opening remote gRPC channels because concurrent gRPC C-core `getenv()` calls racing with `monkeypatch.setenv()` cause glibc `SIGSEGV` on Ubuntu 24.04 CI.
   - Core unit tests must instantiate `CoreGCSFileSystem(token="anon", skip_instance_cache=True)` (from `gcsfs.core import GCSFileSystem as CoreGCSFileSystem`) or stub gRPC clients — using `gcsfs.GCSFileSystem()` pulls `ExtendedGcsFileSystem` under default `GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT=true`.
@@ -203,5 +203,5 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
 - **CI, Codecov, Benchmarks & Cloud Build**:
   - `conftest.py`'s `pytest_ignore_collect` skips **all** of `gcsfs/tests/perf/**` unless `--run-benchmarks` or `--run-benchmarks-infra` is passed. Any new benchmark infra unit test MUST be wired into `.github/workflows/ci.yml` (`--run-benchmarks-infra`).
   - Codecov enforces an **80% patch coverage target** (0% drop). Dead/untested defensive branches in new code block CI.
-  - `cloudbuild/e2e/` worker counts must remain in lockstep across `create_buckets.sh`, `run_tests.sh`, and `cleanup.sh`. Quote shell variables (`"$VAR"`) and pass comma/bracket Helm values with `--set-literal`.
+  - `cloudbuild/` E2E scripts (`cloudbuild/create_buckets.sh`, `cloudbuild/run_tests.sh`, `cloudbuild/cleanup.sh`, `cloudbuild/e2e-tests-cloudbuild.yaml`) must keep worker counts in lockstep. Quote shell variables (`"$VAR"`) and pass comma/bracket Helm values with `--set-literal`.
   - Dependency policy: no upper bounds on runtime dependencies in `pyproject.toml`; keep `environment_gcsfs.yaml` synced with `pyproject.toml` (preferring conda packages); follow `CONTRIBUTING.md`'s `fsspec` lower-bound policy before bumping `fsspec>=...`.

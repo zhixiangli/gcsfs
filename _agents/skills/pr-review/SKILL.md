@@ -16,6 +16,7 @@ If invoked as `/pr-review` with no target, do not review. Ask:
 > - A local branch (e.g. `/pr-review branch`)
 
 ### Local CLI mode: `/pr-review <PR# or URL>`
+Extract the numeric PR number `<N>` from a URL before calling `gh api`:
 ```bash
 gh pr view <N> -R fsspec/gcsfs --json title,body,author,baseRefName,headRefName,files,additions,deletions,commits
 gh pr diff <N> -R fsspec/gcsfs
@@ -96,7 +97,7 @@ Complete this **before** line-level review. Answer with evidence:
 1. **Problem**: what concrete call/input fails on `main` today? If neither the description nor the code shows one, that is the lead finding.
 2. **Root cause & layer**: cause or symptom? Should this live in `fsspec`, `google-cloud-storage`, `google-cloud-storage-control`, or `grpcio`? Private/experimental upstream calls require a `TODO` + upstream issue link AND proof an upstream fix isn't cheaper.
 3. **Ownership & dependencies**: should `gcsfs` own this? Are new deps justified, upper-bound-free, compliant with the `fsspec` floor policy, and synced to `environment_gcsfs.yaml`?
-4. **Existing counterpart**: does `gcsfs` or `fsspec` already have this (`_dircache`, `download_range`, `poll_lro`, `_validate_grpc_write_kms_key_name`, `_classify_layout_error`, `fsspec.asyn.sync_teardown`, `tests/layouts.py`, `tests/lro_fakes.py`)?
+4. **Existing counterpart**: does `gcsfs` or `fsspec` already have this (`_dircache`, `download_range`, `poll_lro`, `_validate_grpc_write_kms_key_name`, `_classify_layout_error`, `fsspec.asyn.sync_teardown` / `zb_hns_utils.sync_teardown`, `tests/layouts.py`, `tests/lro_fakes.py`)?
 5. **Smallest alternative**: write out the minimal design and rough LoC estimate.
 6. **Value & perf evidence**: does a new public API/knob have a named user or in-repo consumer? Does a perf PR have a plausible diff mechanism and multi-run numbers beating noise?
 7. **One-sided design**: check symmetry across `GCSFileSystem`/`ExtendedGcsFileSystem`, `GCSFile`/`ZonalFile`, Flat/HNS/Zonal/RCU (`rcu_rapid_write` False & True), all write entry points, and sync/async paths.
