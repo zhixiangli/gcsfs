@@ -144,7 +144,7 @@ For each comment you are asked to evaluate:
 
 ## Output Format
 
-Follow this exact structure. Keep the visible section (everything outside `<details>`) under **~400 words** for a typical PR. Omit empty sections, except `Example` (always include unless trivial typo/1-line config) and `Not verified` (always include when live GCS / external behavior could not be exercised).
+Follow this exact structure. Keep the visible section (everything outside `<details>`) under **~400 words** for a typical PR by keeping each `Must fix` bullet to 1–2 crisp sentences (move per-file walkthroughs and test lists into `<details>`). Omit empty sections, except `Example` (always include unless trivial typo/1-line config) and `Not verified` (always include when live GCS / external behavior could not be exercised).
 
 ```markdown
 **Verdict: Approve | Request changes | Needs discussion** -- <one sentence: decisive reason>
