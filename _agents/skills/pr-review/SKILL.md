@@ -27,10 +27,11 @@ gh api --paginate repos/fsspec/gcsfs/pulls/<N>/comments
 Print the review in the terminal; **never post to GitHub unless explicitly asked**.
 
 ### Local branch mode: `/pr-review branch`
-Pick `upstream/main` if an `upstream` remote exists, else `origin/main`:
+Pick `upstream/main` if an `upstream` remote exists, else `origin/main` (if `git fetch` fails offline, diff against the local ref and note it under `Not verified`; check `git status --short` so uncommitted edits are not silently missed):
 ```bash
 BASE_REMOTE=$(git remote | grep -qx upstream && echo upstream || echo origin)
-git fetch "$BASE_REMOTE" main
+git fetch "$BASE_REMOTE" main || true
+git status --short
 git diff --stat "$BASE_REMOTE/main...HEAD"
 git diff "$BASE_REMOTE/main...HEAD"
 git log "$BASE_REMOTE/main..HEAD"
@@ -90,7 +91,7 @@ Load only the references matching files touched by the diff:
    - Non-blocking nit -> `Should consider`.
    - Proven factually mistaken against code at HEAD in Step 5 -> **never** put in `Must fix`; note the discrepancy concisely under `Questions` with `file:line` evidence.
 4. **Re-review baseline**: read prior review + author replies. Weigh replies on technical merits only (`"follow-up"` / `"not now"` / teammate `"LGTM"` do not clear must-fixes).
-5. **Open-PR overlap check (always)**: run `gh pr list -R fsspec/gcsfs --state open --search "<term>"` for the feature name and each main modified file (also check recent `main` commits for newly introduced helpers). Record search terms and matches in `<details>` (or note `"gh unavailable / offline"` if offline). Flag overlapping rewrites or silent non-conflicting merge hazards.
+5. **Open-PR overlap check (always)**: check both **file-path overlap** (`gh pr list -R fsspec/gcsfs --state open --limit 100 --json number,title,files` filtered by the PR's main modified paths, since GitHub `--search` ignores file paths) and **feature keywords** (`gh pr list -R fsspec/gcsfs --state open --search '"<term>"'` — quote hyphenated/multi-word terms to prevent `-word` negation), plus recent `main` commits for newly introduced helpers. Record searched files/terms and matches in `<details>` (or note `"gh unavailable / offline"` if offline). Flag overlapping rewrites or silent non-conflicting merge hazards.
 
 ### Step 2: Necessity & Design Gate
 Complete this **before** line-level review. Answer with evidence:

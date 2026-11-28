@@ -7,14 +7,16 @@ Pre-verified contracts for `gcsfs`'s upstream stack. In Step 5 fact-checking:
 
 ## Live Source Verification Commands
 
+Run with the active project virtualenv Python (e.g., `python3`, `venv/bin/python`, or `.venv/bin/python` where `gcsfs` dependencies are installed):
+
 ```bash
 # Locate and print any pure-Python upstream class/method in the active environment
-python -c "import inspect, fsspec.asyn; print(inspect.getfile(fsspec.asyn.AsyncFileSystem)); print(inspect.getsource(fsspec.asyn.AsyncFileSystem._expand_path))"
-python -c "import inspect, google.cloud.storage.asyncio.async_multi_range_downloader as m; print(inspect.getsource(m.AsyncMultiRangeDownloader.download_ranges))"
-python -c "import inspect, google.cloud.storage.asyncio.async_appendable_object_writer as m; print(inspect.getsource(m.AsyncAppendableObjectWriter.append))"
-python -c "import inspect, google.cloud.storage.asyncio.async_grpc_client as m; print(inspect.getsource(m.AsyncGrpcClient))"
-python -c "import inspect, google.cloud.storage_control_v2.services.storage_control.async_client as m; print(inspect.getfile(m))"
-python -c "import importlib.metadata as im; [print(p, im.version(p)) for p in ('fsspec','google-cloud-storage','google-cloud-storage-control','google-api-core','grpcio','aiohttp')]"
+python3 -c "import inspect, fsspec.asyn; print(inspect.getfile(fsspec.asyn.AsyncFileSystem)); print(inspect.getsource(fsspec.asyn.AsyncFileSystem._expand_path))"
+python3 -c "import inspect, google.cloud.storage.asyncio.async_multi_range_downloader as m; print(inspect.getsource(m.AsyncMultiRangeDownloader.download_ranges))"
+python3 -c "import inspect, google.cloud.storage.asyncio.async_appendable_object_writer as m; print(inspect.getsource(m.AsyncAppendableObjectWriter.append))"
+python3 -c "import inspect, google.cloud.storage.asyncio.async_grpc_client as m; print(inspect.getsource(m.AsyncGrpcClient))"
+python3 -c "import inspect, google.cloud.storage_control_v2.services.storage_control.async_client as m; print(inspect.getfile(m))"
+python3 -c "import importlib.metadata as im; [print(p, im.version(p)) for p in ('fsspec','google-cloud-storage','google-cloud-storage-control','google-api-core','grpcio','aiohttp')]"
 ```
 
 ## 1. fsspec (`filesystem_spec`)
@@ -60,13 +62,13 @@ GitHub Actions installs `filesystem_spec` from git `main`, while PyPI users inst
 | `#2376`, `#2477` | Async `get` relative-path `os.makedirs("")` fix & `stringify_path` | Relative local destinations still fail in base `2026.9.0` |
 | `#2205`, `#2441` | `mv` self-move and move-into-self guards | Base `mv` lacks self-move guards on `2026.9.0` |
 | `#2487`, `#2213`, `#2212`, `#2110` | `DirFileSystem` `_resolves_dotdot`, `async_impl`/`local_file` mirroring, `_join` trailing-`/` preservation | `DirFileSystem` tests passing on CI HEAD may fail on `2026.9.0` |
-| `#2319`, `#2407`, `#2301`, `#2245`, `#2260`, `#2344` | `BlockCache` EOF clamp, `FirstChunkCache` `start >= size`, `MMapCache.close()`, multi-byte `readuntil`, `readinto` closed-file check, `AbstractBufferedFile.len` | Relying on these cache/file fixes breaks `2026.9.0` users |
+| `#2319`, `#2407`, `#2301`, `#2245`, `#2260`, `#2344` | `BlockCache` EOF clamp, `FirstChunkCache` `start >= size`, `MMapCache.close()`, multi-byte `readuntil`, `readinto` readonly-buffer / closed-file check, `AbstractBufferedFile.len` | Relying on these cache/file fixes breaks `2026.9.0` users |
 | `#2375` | `to_dict` nested-dict `password` redaction (still never redacts `token`) | Nested secrets still exposed on `2026.9.0`; `token` unredacted on both |
 | `#2287` | `FSMap.setitems` calling `mkdirs` per unique parent | `FSMap` batch writes behave differently on `2026.9.0` |
 
 ## 2. google-cloud-storage
 
-**Verified against:** `google-cloud-storage==3.15.0..3.17.1` (`pyproject.toml` floor `>=3.15.0` where applicable) and git HEAD (`842cb11c27f`).
+**Verified against:** `google-cloud-storage==3.15.0..3.17.1` (`pyproject.toml` floor `>=3.15.0` where applicable) and `googleapis/google-cloud-python` (`packages/google-cloud-storage`) git HEAD (`842cb11c27f`).
 
 ### `AsyncGrpcClient` (`google.cloud.storage.asyncio.async_grpc_client`)
 
@@ -102,7 +104,7 @@ GitHub Actions installs `filesystem_spec` from git `main`, while PyPI users inst
 **Verified against:** `google-cloud-storage-control==1.14.0..1.17.0` and `google-api-core`.
 
 - **`StorageControlAsyncClient` (`google.cloud.storage_control_v2`)**:
-  - `get_storage_layout` returns `StorageLayout` with `location_type`, `hierarchical_namespace.enabled`, and `rapid_cache_info.cache_type` (`"RAPID_CACHE_ULTRA"` / `"RAPID_CACHE"`).
+  - `get_storage_layout` returns `StorageLayout` with `location_type`, `hierarchical_namespace.enabled`, and `rapid_cache_info.cache_type` (lowercase kebab-case wire values `"rapid-cache-ultra"` / `"rapid-cache"`).
   - `folder_id` and non-empty `list_folders` `prefix` **must end with `"/"`**.
   - GAPIC default retry configuration **omits `delete_folder`** (`gcsfs` supplies its own retry config via `get_storage_control_retry_config`).
   - Pre-building `channel=` drops GAPIC's `max_send/receive_message_length=-1` (re-introducing the 4 MiB cap) and drops `client.api_endpoint`.
@@ -113,7 +115,7 @@ GitHub Actions installs `filesystem_spec` from git `main`, while PyPI users inst
 
 ## 4. grpcio / grpc.aio & C-Core
 
-**Verified against:** `grpcio==1.85.3` / `grpc` master (`676a469ac7`, C-core & Cython source).
+**Verified against:** `grpcio==1.84.0` / `grpc` master (`676a469ac7`, `1.84.0.dev0`, C-core & Cython source).
 
 - **Event-loop binding & retention (`grpc.aio._channel`, `_cygrpc.PollerCompletionQueue`)**:
   - `get_working_loop()` on Python 3.12+/3.14 when no loop is running creates and binds the channel to a brand-new, **never-started** event loop.

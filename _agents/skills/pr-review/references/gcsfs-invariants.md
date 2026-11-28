@@ -12,7 +12,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
   - `gcsfs/zb_hns_utils.py`: `MRDPool`, `MRDPoolCache`, `init_mrd`, `init_aaow`, `download_range(s)`, `_download_ranges_kwargs`, `DirectMemmoveBuffer`, `PartialView`, `sync_teardown` / `_on_loop_thread` / `_defer_task`.
   - `gcsfs/zonal_file.py`: `ZonalFile` (read/write/append/create over `MRDPool` + `AAOW`, CMEK validation, `_abort_write`).
   - `gcsfs/_dircache.py`: `DirCacheUpdater` (flat) and `HnsDirCacheUpdater` (HNS).
-  - `gcsfs/parallel_upload.py`: multi-part/parallel file & bytes upload (`async_transfer_manager` for gRPC, sync `transfer_manager` for HTTP).
+  - `gcsfs/parallel_upload.py`: parallel file & bytes upload (`async_transfer_manager` over `AsyncGrpcClient`).
   - `gcsfs/poller.py`: generic async poller and `poll_lro` for HNS long-running operations.
   - `gcsfs/retry.py`: `HttpError`, `ChecksumError`, `GenerationMismatchError`, `NonRetryableError`, `validate_response`, `retry_request`, `get_storage_control_retry_config`.
   - `gcsfs/credentials.py`: `GoogleCredentials`, `_get_creds_from_raw_token`, token caching/refresh.
@@ -68,7 +68,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
 - **HNS cache (`HnsDirCacheUpdater`, `_dircache.py`)**:
   - Uses **only** `_is_bucket_hns_cached` — never sends a layout RPC after a mutation.
   - Normalizes `path1` and `path2` via `_strip_protocol(...).rstrip("/")`.
-  - `_rm_files` must update the cache **only** for paths in `deleted + confirmed_absent` (HTTP 200/204/404 or gRPC `NOT_FOUND`). Never mutate the HNS cache in place for failed or ambiguous deletes (unlike flat invalidation, stale in-place edits do not self-correct).
+  - `_rm_files` (`gcsfs/core.py`) must pass **only** paths in `deleted + confirmed_absent` (HTTP 200/204/404 or gRPC `NOT_FOUND`) to `HnsDirCacheUpdater._rm_files_cache_update` (`gcsfs/_dircache.py`). Never mutate the HNS cache in place for failed or ambiguous deletes (unlike flat invalidation, stale in-place edits do not self-correct).
 - **Known `invalidate_cache` quirk (`core.py`)**:
   - `GCSFileSystem.invalidate_cache(path)` walks **up** ancestor directories only (it does not clear cached descendants under `path`) and does not call `super().invalidate_cache(path)`. PRs deleting or renaming directory subtrees must explicitly clear descendants if needed.
 
@@ -88,7 +88,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
 - **RCU (`is_rcu`) lifecycle (`extended_gcsfs.py`)**:
   - Reads on RCU buckets always use gRPC (`MRD`).
   - Writes on RCU buckets use HTTP by default; gRPC `AAOW` (`storage_class="RAPID"`, `finalize_on_close=True`) is used only when `rcu_rapid_write=True`.
-  - On RCU `GoogleAPICallError`, `_rcu_disabled_after_error` re-checks the bucket layout once and raises `RapidCacheUltraDisabledError` if RCU was disabled server-side. **Every** write entry point (`_put_file`, `_pipe_file`, `_perform_parallel_upload`, `initiate_upload`, `simple_upload`, and `ZonalFile`) must handle or stay consistent with this fallback to HTTP.
+  - On RCU `GoogleAPICallError`, `_rcu_disabled_after_error` re-checks the bucket layout once and returns `bool`: `_init_aaow` raises `RapidCacheUltraDisabledError` (caught by `_put_file`, `_pipe_file`, `initiate_upload`, and `simple_upload` to retry over HTTP, and surfaced by `ZonalFile`), while `_perform_parallel_upload` retries `upload(None)` without `storage_class="RAPID"`. **Every** write entry point must stay consistent with this recovery path.
 
 ## 6. HNS Folder Operations & LRO Poller
 
@@ -142,7 +142,7 @@ Symbol-indexed reference of `gcsfs` production invariants, subtle traps, and tes
   - `_close_impl` invalidates directory cache on failed flush and tears down `mrd_pool` and `aaow` independently (an error closing one must not skip closing the other).
   - `close_aaow` re-raises close errors **only** when `finalize_on_close=True`.
 - **CMEK fail-closed rules (`extended_gcsfs.py`, `zonal_file.py`)**:
-  - `_validate_grpc_write_kms_key_name` rejects RCU gRPC writes with `NotImplementedError`, rejects `/cryptoKeyVersions/` paths with `ValueError`, and requires preconditions where applicable.
+  - `_validate_grpc_write_kms_key_name` rejects RCU gRPC writes with `NotImplementedError`, requires `zb_hns_utils.Preconditions` SDK support (`NotImplementedError` if absent), and rejects `/cryptoKeyVersions/` paths with `ValueError`.
   - `ab` append mode uses `_resolve_kms_append` via direct HTTP `objects.get` (never `_info`, which can resolve to an HNS folder) and retries creation with `if_generation_match=0` on 404 race.
 - **Parallel upload (`parallel_upload.py`, `extended_gcsfs.py`)**:
   - Dual import: tries `google.cloud.storage.asyncio.async_transfer_manager`, then falls back to `google.cloud.storage._experimental.asyncio.async_transfer_manager`.
